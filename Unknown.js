@@ -10,7 +10,7 @@ const path = require('path');
 const fs = require('fs');
 const menu = require('./menu.js');
 const rateLimit = require('express-rate-limit');
-
+const { sendAlert } = require('./mailer');
 
 
 // ConfiguraÁ„o do limite de requisiÁıes por IP
@@ -57,10 +57,9 @@ app.use(bodyParser.json({ limit: '10mb' })); // Reduza o limite se n√£o for nece
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
 
-
 // Inicializando o cliente do WhatsApp
 const client = new Client({
-    authStrategy: new LocalAuth({ clientId: "User01", dataPath: "./Sessoes" }),
+    authStrategy: new LocalAuth(),
     // proxyAuthentication: { username: 'username', password: 'password' },
     puppeteer: {
         // args: ['--proxy-server=proxy-server-that-requires-authentication.example.com'],
@@ -69,33 +68,43 @@ const client = new Client({
     }
 });
 
-client.on('disconnected', (reason) => {
-    logger.error('Cliente desconectado:', reason);
-    client.destroy();
-    client.initialize();
+client.on('loading_screen', (percent, message) => {
+    console.log('LOADING SCREEN', percent, message);
 });
 
-// Gera√ß√£o do QR code
+client.on('authenticated', () => {
+    console.log('AUTHENTICATED');
+});
+
+// Evento de falha na autenticaÁ„o
+client.on('auth_failure', msg => {
+    console.error('AUTHENTICATION FAILURE', msg);
+    sendAlert("WhatsApp - Falha de Autenticacao", `O cliente falhou ao autenticar.\n\nDetalhes: ${msg}`);
+});
+
+
+
+
+
+
+
+// Evento de desconex„o
+client.on('disconnected', (reason) => {
+    sendAlert("WhatsApp - Cliente Desconectado", `O cliente foi desconectado. Motivo: ${reason}`);
+    client.destroy();
+});
+
+
+// Evento de QR gerado (sess„o expirada, precisa autenticar de novo)
 client.on("qr", (qr) => {
     qrcodeterm.generate(qr, { small: true }, function (qrcode) {
-        logger.warn('QR code gerado com sucesso');
         console.log(qrcode);  // Mostrando o QR code no console
-
-        // Logando o QR code no arquivo de logs
-        logger.warn('QR Code gerado: \n' + qrcode); // Adicionando o conte√∫do do QR Code no log
+		sendAlert("WhatsApp - Sessao", "Um novo QR Code foi gerado. E necessario autenticar!" + qrcode);
     });
 });
 
-client.on('auth_failure', msg => {
-    // Fired if session restore was unsuccessful
-    console.error('AUTHENTICATION FAILURE', msg);
-});
-
-let clientStatus = 'disconnected'; // Inicialmente, o cliente est√° desconectado
-
 client.on('ready', async () => {
     console.log('READY');
-    clientStatus = 'ready'; // Inicialmente, o cliente est√° desconectado
     const debugWWebVersion = await client.getWWebVersion();
     console.log(`WWebVersion = ${debugWWebVersion}`);
 
@@ -110,7 +119,7 @@ client.on('ready', async () => {
 
 // Inicializando o cliente
 client.initialize().catch((err) => {
-    logger.error('Erro ao inicializar o cliente do WhatsApp:', err);
+    logger.error('Erro ao iniciar o cliente WhatsApp:');
 });
 
 // Controle de chamadas fora do hor√°rio comercial

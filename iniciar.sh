@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 🎯 Script interativo de setup com estilo, emojis e prevenção de erros
+# 🎮 Setup divertido com aviãozinho atirando em naves 🚀
 
 # ==============================
 # Cores
@@ -12,36 +12,15 @@ BLUE="\e[34m"
 CYAN="\e[36m"
 RESET="\e[0m"
 
-# ==============================
-# Função de log
-# ==============================
 LOGFILE="setup.log"
-echo "" > "$LOGFILE" # limpa log no início
-
-log_error() {
-  echo -e "${RED}❌ ERRO: $1${RESET}"
-  echo "[ERRO] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOGFILE"
-}
-
-log_info() {
-  echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOGFILE"
-}
+echo "" > "$LOGFILE"
 
 # ==============================
-# Verifica se é root
-# ==============================
-if [ "$EUID" -ne 0 ]; then
-  log_error "Script precisa ser executado como root!"
-  echo -e "${RED}⚠️  Por favor, execute como root ou use sudo!${RESET}"
-  exit 1
-fi
-
-# ==============================
-# Função barra de progresso
+# Barra de progresso
 # ==============================
 show_progress() {
   local duration=$1
-  local steps=50
+  local steps=40
   local progress=0
   local completed=""
 
@@ -55,74 +34,55 @@ show_progress() {
   echo -e "] ✅\n"
 }
 
+
 # ==============================
-# Boas-vindas
+# Mensagem inicial
 # ==============================
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo -e "${GREEN}✨ Bem-vindo ao Setup Automático ✨${RESET}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-sleep 1
+
+# Inicia animação em paralelo
+anim_pid=$!
 
 # ==============================
-# Verifica dependências essenciais
+# Instala dependências
 # ==============================
-echo -e "${YELLOW}🔍 Verificando dependências do sistema...${RESET}"
-
-if ! command -v npm &> /dev/null; then
-  log_error "npm não encontrado! Instale Node.js antes de continuar."
-  echo -e "${RED}❌ npm não encontrado. Instale Node.js (https://nodejs.org) e tente novamente.${RESET}"
-  exit 1
-fi
-
-log_info "npm encontrado."
-
-# ==============================
-# Instala dependências do projeto
-# ==============================
-echo -e "${YELLOW}📦 Instalando dependências necessárias...${RESET}"
-show_progress 5 &
+echo -e "\n${YELLOW}📦 Instalando dependências...${RESET}"
+show_progress 6 &
 progress_pid=$!
 if ! npm install express > /dev/null 2>>"$LOGFILE"; then
-  log_error "Falha ao instalar express"
-  echo -e "${RED}❌ Erro ao instalar dependência express.${RESET}"
-  kill $progress_pid 2>/dev/null
+  echo -e "${RED}❌ Falha ao instalar express${RESET}"
+  kill $anim_pid 2>/dev/null
   exit 1
 fi
-
 if ! npm install pm2 -g > /dev/null 2>>"$LOGFILE"; then
-  log_error "Falha ao instalar pm2 globalmente"
-  echo -e "${RED}❌ Erro ao instalar o PM2.${RESET}"
-  kill $progress_pid 2>/dev/null
+  echo -e "${RED}❌ Falha ao instalar pm2${RESET}"
+  kill $anim_pid 2>/dev/null
   exit 1
 fi
 wait $progress_pid
-
 echo -e "${GREEN}✅ Dependências instaladas com sucesso!${RESET}\n"
-log_info "Dependências instaladas."
 
 # ==============================
-# Iniciando aplicação
+# Inicia aplicação
 # ==============================
 if [ -f "Unknown.js" ]; then
-  echo -e "${BLUE}⚡ Iniciando o arquivo ${YELLOW}Unknown.js${BLUE} com PM2...${RESET}"
-
+  echo -e "${BLUE}⚡ Iniciando ${YELLOW}Unknown.js${RESET}"
   if ! pm2 start Unknown.js --name "meu-app" >>"$LOGFILE" 2>&1; then
-    log_error "Erro ao iniciar Unknown.js com PM2"
-    echo -e "${RED}❌ Falha ao iniciar aplicação com PM2.${RESET}"
+    echo -e "${RED}❌ Erro ao iniciar Unknown.js${RESET}"
+    kill $anim_pid 2>/dev/null
     exit 1
   fi
-
-  echo -e "${GREEN}🚀 Aplicação agora está sendo gerenciada pelo PM2!${RESET}"
-  echo -e "${CYAN}💻 Para verificar, use: ${YELLOW}pm2 list${RESET}"
-  log_info "Aplicação Unknown.js iniciada com sucesso."
+  echo -e "${GREEN}🚀 Aplicação está rodando no PM2!${RESET}"
 else
-  log_error "Arquivo Unknown.js não encontrado."
-  echo -e "${RED}❌ Erro: Arquivo 'Unknown.js' não encontrado!${RESET}"
+  echo -e "${RED}❌ Arquivo Unknown.js não encontrado!${RESET}"
+  kill $anim_pid 2>/dev/null
   exit 1
 fi
 
 # ==============================
 # Finalização
 # ==============================
-echo -e "\n${GREEN}✨ Setup finalizado com sucesso! Bom uso do seu app 🚀${RESET}"
-log_info "Setup finalizado com sucesso."
+kill $anim_pid 2>/dev/null
+echo -e "\n${GREEN}✨ Setup finalizado com sucesso! Bom uso 🚀${RESET}"
