@@ -8,7 +8,6 @@ const { format } = require('date-fns');
 const winston = require('winston');
 const path = require('path');
 const fs = require('fs');
-const menu = require('./menu.js');
 const rateLimit = require('express-rate-limit');
 const { sendAlert } = require('./mailer');
 
@@ -82,12 +81,6 @@ client.on('auth_failure', msg => {
     sendAlert("WhatsApp - Falha de Autenticacao", `O cliente falhou ao autenticar.\n\nDetalhes: ${msg}`);
 });
 
-
-
-
-
-
-
 // Evento de desconexão
 client.on('disconnected', (reason) => {
     sendAlert("WhatsApp - Cliente Desconectado", `O cliente foi desconectado. Motivo: ${reason}`);
@@ -102,7 +95,7 @@ client.on("qr", (qr) => {
 		sendAlert("WhatsApp - Sessao", "Um novo QR Code foi gerado. E necessario autenticar!" + qrcode);
     });
 });
-
+let clientStatus = 'disconnected'; // Inicialmente, o cliente estÃ¡ desconectado
 client.on('ready', async () => {
     console.log('READY');
     const debugWWebVersion = await client.getWWebVersion();
