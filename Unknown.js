@@ -12,11 +12,11 @@ const rateLimit = require('express-rate-limit');
 const { sendAlert } = require('./mailer');
 
 
-// Configuração do limite de requisições por IP
+// Configuraï¿½ï¿½o do limite de requisiï¿½ï¿½es por IP
 const limiter = rateLimit({
     windowMs: 5 * 60 * 1000, // 5 minutos
-    max: 100, // Limite de 100 requisições por IP a cada 5 minutos
-    message: 'Muitas requisições vindas deste IP, tente novamente mais tarde.',
+    max: 100, // Limite de 100 requisiï¿½ï¿½es por IP a cada 5 minutos
+    message: 'Muitas requisiï¿½ï¿½es vindas deste IP, tente novamente mais tarde.',
     headers: true
 });
 
@@ -60,12 +60,40 @@ app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 const client = new Client({
     authStrategy: new LocalAuth(),
     // proxyAuthentication: { username: 'username', password: 'password' },
+    /**
+     * This option changes the browser name from defined in user agent to custom.
+     */
+     deviceName: 'Your custom name',
+    /**
+     * This option changes browser type from defined in user agent to yours. It affects the browser icon
+     * that is displayed in 'linked devices' section.
+     * Valid value are: 'Chrome' | 'Firefox' | 'IE' | 'Opera' | 'Safari' | 'Edge'.
+     * If another value is provided, the browser icon in 'linked devices' section will be gray.
+     */
+    // browserName: 'Firefox',
     puppeteer: {
         // args: ['--proxy-server=proxy-server-that-requires-authentication.example.com'],
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        headless: true,
+        headless: false,
+    },
+/**
+ *     pairWithPhoneNumber: {
+        phoneNumber: '5585985304415', // Pair with phone number (format: <COUNTRY_CODE><PHONE_NUMBER>)
+        showNotification: false,
+        intervalMs: 180000 // Time to renew pairing code in milliseconds, defaults to 3 minutes
     }
+ */
 });
+
+
+//const client = new Client({
+//    authStrategy: new LocalAuth(),
+// proxyAuthentication: { username: 'username', password: 'password' },
+//    puppeteer: {
+// args: ['--proxy-server=proxy-server-that-requires-authentication.example.com'],
+//        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+//        headless: true,
+//    }
+//});
 
 client.on('loading_screen', (percent, message) => {
     console.log('LOADING SCREEN', percent, message);
@@ -75,24 +103,24 @@ client.on('authenticated', () => {
     console.log('AUTHENTICATED');
 });
 
-// Evento de falha na autenticação
+// Evento de falha na autenticaï¿½ï¿½o
 client.on('auth_failure', msg => {
     console.error('AUTHENTICATION FAILURE', msg);
     sendAlert("WhatsApp - Falha de Autenticacao", `O cliente falhou ao autenticar.\n\nDetalhes: ${msg}`);
 });
 
-// Evento de desconexão
+// Evento de desconexï¿½o
 client.on('disconnected', (reason) => {
     sendAlert("WhatsApp - Cliente Desconectado", `O cliente foi desconectado. Motivo: ${reason}`);
     client.destroy();
 });
 
 
-// Evento de QR gerado (sessão expirada, precisa autenticar de novo)
+// Evento de QR gerado (sessï¿½o expirada, precisa autenticar de novo)
 client.on("qr", (qr) => {
     qrcodeterm.generate(qr, { small: true }, function (qrcode) {
         console.log(qrcode);  // Mostrando o QR code no console
-		sendAlert("WhatsApp - Sessao", "Um novo QR Code foi gerado. E necessario autenticar!" + qrcode);
+        sendAlert("WhatsApp - Sessao", "Um novo QR Code foi gerado. E necessario autenticar!" + qrcode);
     });
 });
 let clientStatus = 'disconnected'; // Inicialmente, o cliente estÃ¡ desconectado
