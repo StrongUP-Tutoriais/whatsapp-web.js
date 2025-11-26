@@ -14,8 +14,13 @@ const fs = require('fs');
 const rateLimit = require('express-rate-limit');
 const { sendAlert } = require('./mailer');
 const stripAnsi = require('strip-ansi');
+const Gerencianet = require('gn-api-sdk-node')
 
 
+
+
+
+const gerencianet = new Gerencianet(options)
 
 // Configuração do rate limiter para evitar abuso de requisições
 const limiter = rateLimit({
@@ -65,9 +70,11 @@ app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 const client = new Client({
     authStrategy: new LocalAuth({ client: 'User', dataPath: './sessions' }),
     puppeteer: {
-        headless: true,
+	args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true
     },
 });
+
 
 // Variável para status do cliente WhatsApp
 let clientStatus = 'disconnected';
@@ -120,7 +127,7 @@ client.on('ready', async () => {
 
 // Inicializa o cliente WhatsApp
 client.initialize().catch((err) => {
-    logger.error('Erro ao iniciar o cliente WhatsApp:');
+    logger.error('Erro ao iniciar o cliente WhatsApp:',err);
 });
 
 // Evento: Rejeita chamadas fora do horário comercial
