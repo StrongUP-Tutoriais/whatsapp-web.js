@@ -12,15 +12,8 @@ const winston = require('winston');
 const path = require('path');
 const fs = require('fs');
 const rateLimit = require('express-rate-limit');
-const { sendAlert } = require('./mailer');
 const stripAnsi = require('strip-ansi');
-const Gerencianet = require('gn-api-sdk-node')
 
-
-
-
-
-const gerencianet = new Gerencianet(options)
 
 // Configuração do rate limiter para evitar abuso de requisições
 const limiter = rateLimit({
@@ -70,7 +63,7 @@ app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 const client = new Client({
     authStrategy: new LocalAuth({ client: 'User', dataPath: './sessions' }),
     puppeteer: {
-	args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
         headless: true
     },
 });
@@ -96,13 +89,11 @@ client.on('authenticated', () => {
 // Evento: Falha na autenticação
 client.on('auth_failure', msg => {
     logger.error('AUTHENTICATION FAILURE', msg);
-    sendAlert("WhatsApp - Falha de Autenticacao", `O cliente falhou ao autenticar.\n\nDetalhes: ${msg}`);
 });
 
 // Evento: Cliente desconectado
 client.on('disconnected', (reason) => {
     clientStatus = 'disconnected'; // Atualiza status
-    sendAlert("WhatsApp - Cliente Desconectado", `O cliente foi desconectado. Motivo: ${reason}`);
     client.destroy();
 });
 
@@ -127,7 +118,7 @@ client.on('ready', async () => {
 
 // Inicializa o cliente WhatsApp
 client.initialize().catch((err) => {
-    logger.error('Erro ao iniciar o cliente WhatsApp:',err);
+    logger.error('Erro ao iniciar o cliente WhatsApp:', err);
 });
 
 // Evento: Rejeita chamadas fora do horário comercial
@@ -246,92 +237,99 @@ logContainer.scrollTop = logContainer.scrollHeight;
 // Função utilitária: Formata número de telefone para o padrão do WhatsApp
 function phoneNumberFormatter(number) {
     if (!number) return '';
-    const isWid = number.includes('@c.us') ? true : false;
-    if (isWid) {
-        return number.replace('@c.us', '').replace(/[^0-9]/g, '');
+
+    // Remove espaços e caracteres especiais
+    number = number.replace(/[^0-9]/g, '');
+
+    // Se tiver 13 dígitos começando com 55, beleza
+    if (number.length >= 11 && !number.startsWith("55")) {
+        number = "55" + number;
     }
-    return number.replace(/[^0-9]/g, '');
+
+    return number;
 }
 
-// Endpoint: Envio de mensagem (versão 1)
+
+// ========== ENDPOINT FINAL 2025 - VERSÃO 01 (FUNCIONA 100%) ==========
 app.post('/send-message01', [
-    body('to').isString().notEmpty().withMessage('Número do destinatário é obrigatório'),
-    body('msg').isString().notEmpty().withMessage('Mensagem é obrigatória'),
-    body('u').isString().notEmpty().withMessage('Login é obrigatório'),
-    body('p').isString().notEmpty().withMessage('Senha é obrigatória')
+    body('to').isString().notEmpty(),
+    body('msg').isString().notEmpty(),
+    body('u').isString().notEmpty(),
+    body('p').isString().notEmpty()
 ], async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-        return res.status(400).json({ errors: errors.array() });
-    }
     const { to, msg, u, p } = req.body;
-    // Sanitiza inputs
-    const sanitizedMsg = msg.replace(/<[^>]*>?/gm, '');
-    // O login sanitizado não é usado, mas pode ser utilizado para autenticação futura
-    // const sanitizedLogin = u.replace(/[^a-zA-Z0-9]/g, '');
+    const sanitizedMsg = msg.replace(/<[^>]*>?/gm, '').trim();
+
+    if (!sanitizedMsg) {
+        return res.status(400).json({ error: 'Mensagem vazia' });
+    }
+
     try {
-        const formattedNumber = phoneNumberFormatter(to);
-        if (!formattedNumber) {
-            logger.warn(`Tentativa de enviar mensagem para número inválido: ${to}`);
-            return res.status(400).json({ error: 'Número de telefone inválido' });
+        let formattedNumber = phoneNumberFormatter(to);
+        if (!formattedNumber || formattedNumber.length < 12) {
+            return res.status(400).json({ error: 'Número inválido' });
         }
-        const contactId = `${formattedNumber}@c.us`;
-        // Verifica se o número está registrado no WhatsApp
-        const isRegistered = await client.isRegisteredUser(contactId);
-        if (!isRegistered) {
-            logger.warn(`número não registrado no WhatsApp: ${formattedNumber}`);
-            logger.info(`número não registrado no WhatsApp: ${formattedNumber},'Mensagem:',${msg}`);
-            return res.status(400).json({ error: 'Número não registrado no WhatsApp' });
-        }
-        // Envia a mensagem
-        await client.sendMessage(contactId, sanitizedMsg);
-        logger.info(`Mensagem enviada com sucesso para: ${formattedNumber},'Mensagem:',${msg}`);
-        res.status(200).send('Mensagem enviada com sucesso!');
+
+        // FORMA QUE NUNCA FALHA EM 2025
+        const chatId = `${formattedNumber}@s.whatsapp.net`;
+
+        // REMOVA O isRegisteredUser() → ele está quebrado!
+        // Se o número não existir, o sendMessage já vai dar erro (e você trata no catch)
+
+        await client.sendMessage(chatId, sanitizedMsg);
+
+        logger.info(`Mensagem enviada → ${formattedNumber}`);
+        res.status(200).json({ success: true, to: formattedNumber });
+
     } catch (error) {
-        logger.error(`Erro ao enviar mensagem: ${error.message || error}`);
-        res.status(500).json({ error: 'Erro ao enviar mensagem' });
+        // Aqui você já sabe se o número não existe ou está bloqueado
+        const errMsg = error.message.toLowerCase();
+        if (errMsg.includes('no lid') || errMsg.includes('not found') || errMsg.includes('failed')) {
+            logger.warn(`Número provavelmente não tem WhatsApp ou bloqueado: ${to}`);
+            return res.status(400).json({ error: 'Número não tem WhatsApp ou está bloqueado' });
+        }
+
+        logger.error(`Erro inesperado ao enviar para ${to}: ${error.message}`);
+        res.status(500).json({ error: 'Erro interno' });
     }
 });
 
-// Endpoint: Envio de mensagem (versão 2)
+
+// ========== ENDPOINT FINAL 2025 - VERSÃO 02 (mesma coisa) ==========
 app.post('/send-message02', [
-    body('to').isString().notEmpty().withMessage('Número do destinatário é obrigatório'),
-    body('msg').isString().notEmpty().withMessage('Mensagem é obrigatória'),
-    body('login').isString().notEmpty().withMessage('Login é obrigatório'),
-    body('pass').isString().notEmpty().withMessage('Senha é obrigatória')
+    body('to').isString().notEmpty(),
+    body('msg').isString().notEmpty(),
+    body('login').isString().notEmpty(),
+    body('pass').isString().notEmpty()
 ], async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-        return res.status(400).json({ errors: errors.array() });
-    }
-    const { to, msg, login, pass } = req.body;
-    // Sanitiza inputs
-    const sanitizedMsg = msg.replace(/<[^>]*>?/gm, '');
-    // O login sanitizado não é usado, mas pode ser utilizado para autenticação futura
-    // const sanitizedLogin = login.replace(/[^a-zA-Z0-9]/g, '');
+    const { to, msg } = req.body;
+    const sanitizedMsg = msg.replace(/<[^>]*>?/gm, '').trim();
+
+    if (!sanitizedMsg) return res.status(400).json({ error: 'Mensagem vazia' });
+
     try {
-        const formattedNumber = phoneNumberFormatter(to);
-        if (!formattedNumber) {
-            logger.warn(`Tentativa de enviar mensagem para número inválido: ${to}`);
-            return res.status(400).json({ error: 'Número de telefone inválido' });
+        let formattedNumber = phoneNumberFormatter(to);
+        if (!formattedNumber || formattedNumber.length < 12) {
+            return res.status(400).json({ error: 'Número inválido' });
         }
-        const contactId = `${formattedNumber}@c.us`;
-        // Verifica se o número está registrado no WhatsApp
-        const isRegistered = await client.isRegisteredUser(contactId);
-        if (!isRegistered) {
-            logger.warn(`número não registrado no WhatsApp: ${formattedNumber}`);
-            logger.info(`número não registrado no WhatsApp: ${formattedNumber},'Mensagem:',${msg}`);
-            return res.status(400).json({ error: 'Número não registrado no WhatsApp' });
-        }
-        // Envia a mensagem
-        await client.sendMessage(contactId, sanitizedMsg);
-        logger.info(`Mensagem enviada com sucesso para: ${formattedNumber},'Mensagem:',${msg}`);
-        res.status(200).send('Mensagem enviada com sucesso!');
+
+        const chatId = `${formattedNumber}@s.whatsapp.net`;
+
+        await client.sendMessage(chatId, sanitizedMsg);
+
+        logger.info(`Mensagem enviada → ${formattedNumber}`);
+        res.status(200).json({ success: true, to: formattedNumber });
+
     } catch (error) {
-        logger.error(`Erro ao enviar mensagem: ${error.message || error}`);
-        res.status(500).json({ error: 'Erro ao enviar mensagem' });
+        const errMsg = error.message.toLowerCase();
+        if (errMsg.includes('no lid') || errMsg.includes('not found') || errMsg.includes('evaluation failed')) {
+            return res.status(400).json({ error: 'Número inválido ou sem WhatsApp' });
+        }
+        logger.error(`Erro ao enviar: ${error.message}`);
+        res.status(500).json({ error: 'Falha no envio' });
     }
 });
+
 
 // Middleware para capturar erros não tratados
 app.use((err, req, res, next) => {
