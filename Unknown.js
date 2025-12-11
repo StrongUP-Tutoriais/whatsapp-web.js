@@ -1,17 +1,21 @@
+// Importação dos módulos necessários
 require("./auto-loader");
 const express = require('express');
-const bodyParser = require('body-parser');
 const { Client, Location, Poll, List, Buttons, LocalAuth, MessageMedia } = require('./index');
 const qrcodeterm = require("qrcode-terminal");
 const QRCode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
-const rateLimit = require('express-rate-limit');
-require('dotenv').config();
+require('dotenv').config();   // ? ESSA LINHA LÊ O ARQUIVO .env
 
-// ===============================
-// NOVO: Carrega usuarios.json
-// ===============================
+const app = express();
+
+app.use(express.json({ limit: '10mb' }));                    // ← PARA LER JSON (POST /send-message, etc)
+app.use(express.urlencoded({ extended: true, limit: '10mb' })); // ← PARA LER form-data e x-www-form-urlencoded
+
+const clientMap = {};
+const qrStore = {};
+
 const usersFilePath = path.join(__dirname, "usuarios.json");
 let usuarios = {};
 
@@ -23,28 +27,6 @@ if (fs.existsSync(usersFilePath)) {
     console.log("[LOG] usuarios.json criado (vazio)");
 }
 
-// ===============================
-// NOVO: Mapa de instâncias
-// ===============================
-const clientMap = {};
-const qrStore = {};
-
-// Rate limiter original
-const limiter = rateLimit({
-    windowMs: 5 * 60 * 1000,
-    max: 100,
-    message: 'Muitas requisições vindas deste IP, tente novamente mais tarde.',
-    headers: true
-});
-
-const app = express();
-app.use(limiter);
-app.use(bodyParser.json({ limit: '10mb' }));
-app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
-
-// ==========================================
-// FUNÇÃO ATUALIZADA: criarInstancia() COM LIMITE DE QR (PRODUÇÃO 2025)
-// ==========================================
 function criarInstancia(usuario) {
     if (clientMap[usuario]) {
         return clientMap[usuario];
@@ -131,18 +113,13 @@ function criarInstancia(usuario) {
 
     return client;
 }
-// ==========================================
-// INSTÂNCIA PADRÃO "admin" – INICIA AUTOMATICAMENTE
-// ==========================================
 const ADMIN_USER = process.env.ADMIN_USER;
 const ADMIN_PASS = process.env.ADMIN_PASS;
-
 if (!usuarios[ADMIN_USER]) {
     usuarios[ADMIN_USER] = { senha: ADMIN_PASS };
     fs.writeFileSync(usersFilePath, JSON.stringify(usuarios, null, 2));
     console.log(`[ADMIN] Usuário admin criado → ${ADMIN_USER}`);
 }
-
 console.log(`\n[ADMIN] Iniciando instância oficial: ${ADMIN_USER}`);
 const adminClient = criarInstancia(ADMIN_USER);
 
@@ -151,10 +128,213 @@ adminClient.on('ready', () => clientStatus = 'ready');
 adminClient.on('qr', () => clientStatus = 'qr');
 adminClient.on('disconnected', () => clientStatus = 'disconnected');
 
+function validarUsuarioSenha(user, pass) {
+    return usuarios[user] && usuarios[user].senha === pass;
+}
+function pegarInstancia(user) {
+    return clientMap[user] || null;
+}
+app.post('/send-message', async (req, res) => {
+    // ←←← LOG MUITO VISÍVEL – SE ISSO NÃO APARECER NO TERMINAL, A REQUISIÇÃO NUNCA CHEGOU AQUI!
+    console.log('\n');
+    console.log('══════════════════════════════════════════════════════════');
+    console.log('   ROTA /send-message ACESSADA AGORA MESMO!');
+    console.log('   Horário:', new Date().toLocaleString('pt-BR', { timeZone: 'America/Fortaleza' }));
+    console.log('   IP:', req.ip || req.socket.remoteAddress);
+    console.log('   Body completo:', req.body);
+    console.log('══════════════════════════════════════════════════════════\n');
 
-// ==========================================
-// LOGIN COM BOTÃO PARA O PAINEL DO ADMIN
-// ==========================================
+    const { to, msg, login, pass } = req.body;
+
+    // === LOG INICIAL ===
+    console.log(`[SEND] Requisição → Usuário: ${login} → Para: ${to}`);
+
+    // === AUTENTICAÇÃO ===
+    // if (!validarUsuarioSenha(login, pass)) {
+    //     console.warn(`[SEND] Acesso negado - Usuário: ${login} - IP: ${req.ip}`);
+    //     return res.status(401).json({ success: false, error: "Login ou senha incorretos" });
+    // }
+
+    // === PEGA INSTÂNCIA DO USUÁRIO ===
+    const instancia = pegarInstancia(login);
+    if (!instancia) {
+        return res.status(400).json({
+            success: false,
+            error: "Instância não iniciada. Acesse /login e escaneie o QR Code."
+        });
+    }
+
+    // === VALIDAÇÕES BÁSICAS ===
+    if (!to || !msg) {
+        return res.status(400).json({ success: false, error: "Parâmetros 'to' e 'msg' são obrigatórios" });
+    }
+
+    // === LIMPEZA DA MENSAGEM (remove HTML, XSS, etc.) ===
+    const textoLimpo = msg.toString()
+        .replace(/<[^>]*>/g, '')    // Remove qualquer HTML
+        //.replace(/\s+/g, ' ')       // Remove quebras de linha extras
+        .trim();
+
+    if (!textoLimpo) {
+        return res.status(400).json({ success: false, error: "Mensagem vazia após limpeza" });
+    }
+
+    // === FORMATA NÚMERO (BRASIL 2025) ===
+    let numero = to.replace(/\D/g, ''); // remove tudo que não é número
+
+    if (numero.length === 11) numero = '55' + numero;                    // 85999999999 → 5585999999999
+    else if (numero.length === 10) numero = '55' + numero;              // número antigo sem 9
+    else if (numero.length === 12 && numero.startsWith('55')) numero = numero; // já veio com 55
+    else if (numero.length === 13 && numero.startsWith('55')) numero = numero; // 55 + DDD + 9 + 8 dígitos
+    else {
+        return res.status(400).json({ success: false, error: "Número inválido ou formato incorreto" });
+    }
+
+    if (!/^55\d{10,11}$/.test(numero)) {
+        return res.status(400).json({ success: false, error: "Número fora do padrão brasileiro" });
+    }
+
+    const chatId = `${numero}@s.whatsapp.net`;  // ← Recomendado em 2025 (funciona com todas as versões)
+
+    try {
+        await instancia.sendMessage(chatId, textoLimpo);
+
+        // === LOG DE SUCESSO ===
+        console.info(`[SEND] Mensagem enviada → ${login} → ${numero} (${textoLimpo.length} chars)`);
+
+        // === RESPOSTA PADRÃO MK-AUTH 2025 ===
+        return res.json({
+            success: true,
+            message: "Mensagem enviada com sucesso!",
+            numero: numero,
+            preview: textoLimpo.substring(0, 80) + (textoLimpo.length > 80 ? "..." : "")
+        });
+
+    } catch (error) {
+        console.error(`[SEND] Erro (${login} → ${numero}): ${error.message}`);
+
+        const err = error.message.toLowerCase();
+
+        // === ERROS ESPECÍFICOS (iguais ao MK-AUTH oficial) ===
+        if (err.includes('no lid') ||
+            err.includes('not found') ||
+            err.includes('not on whatsapp') ||
+            err.includes('number not') ||
+            err.includes('invalid')) {
+            return res.status(400).json({
+                success: false,
+                error: "Número sem WhatsApp ou inválido"
+            });
+        }
+
+        if (err.includes('rate-overlimit') || err.includes('429')) {
+            return res.status(429).json({
+                success: false,
+                error: "Muitas mensagens. Aguarde alguns minutos."
+            });
+        }
+
+        // === ERRO GENÉRICO ===
+        return res.status(500).json({
+            success: false,
+            error: "Erro interno ao enviar mensagem"
+        });
+    }
+});
+app.post('/send-document', async (req, res) => {
+    let tempFilePath = null;
+    try {
+        const { to, caption = '', document, filename = 'boleto.pdf', login, pass } = req.body;
+
+        // === AUTENTICAÇÃO ===
+        if (!validarUsuarioSenha(login, pass)) {
+            console.warn(`[DOC] Acesso negado - Usuário: ${login} - IP: ${req.ip}`);
+            return res.status(401).json({ success: false, error: "Login ou senha incorretos" });
+        }
+
+        // === INSTÂNCIA DO USUÁRIO ===
+        const instancia = pegarInstancia(login);
+        if (!instancia) {
+            return res.status(400).json({
+                success: false,
+                error: "Instância não iniciada. Acesse /login e escaneie o QR Code."
+            });
+        }
+
+        // === VALIDAÇÕES BÁSICAS ===
+        if (!to || !document) {
+            return res.status(400).json({ success: false, error: "Parâmetros 'to' e 'document' são obrigatórios" });
+        }
+
+        // === FORMATA NÚMERO ===
+        let numero = to.replace(/\D/g, '');
+        if (numero.length === 11) numero = '55' + numero;
+        if (numero.length === 10) numero = '55' + numero; // caso venha sem o 9
+        if (!/^55\d{10,11}$/.test(numero)) {
+            return res.status(400).json({ success: false, error: "Número inválido" });
+        }
+
+        // === CORRIGE BASE64 DO MK-AUTH ===
+        const base64Clean = document
+            .replace(/^data:.+;base64,/, '')
+            .replace(/%3D/g, '=')
+            .replace(/%2F/g, '/')
+            .replace(/%2B/g, '+')
+            .replace(/%0A/g, '\n')
+            .replace(/%0D/g, '\r');
+
+        const buffer = Buffer.from(base64Clean, 'base64');
+
+        // === VALIDA TAMANHO ===
+        if (buffer.length < 5000 || buffer.length > 15 * 1024 * 1024) {
+            return res.status(400).json({ success: false, error: "PDF deve ter entre 5KB e 15MB" });
+        }
+
+        // === SALVA TEMP ===
+        tempFilePath = path.join(__dirname, `boleto_${Date.now()}_${numero.slice(-4)}.pdf`);
+        fs.writeFileSync(tempFilePath, buffer);
+        const media = MessageMedia.fromFilePath(tempFilePath);
+
+        const chatId = `${numero}@s.whatsapp.net`;
+
+        // === ENVIA DOCUMENTO ===
+        await instancia.sendMessage(chatId, media);
+
+        // === ENVIA TEXTO APÓS 2 SEGUNDOS ===
+        await new Promise(r => setTimeout(r, 2000));
+        await instancia.sendMessage(chatId, `*Segue seu boleto em anexo!*`);
+
+        // === LIMPA TEMP ===
+        fs.unlinkSync(tempFilePath);
+        tempFilePath = null;
+
+        // === SUCESSO ===
+        console.info(`[DOC] Boleto enviado por ${login} → ${numero} (${(buffer.length / 1024).toFixed(1)} KB)`);
+        return res.json({
+            success: true,
+            message: "Boleto enviado com sucesso!",
+            numero,
+            tamanho_kb: (buffer.length / 1024).toFixed(1)
+        });
+
+    } catch (error) {
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+        }
+
+        console.error(`[DOC] Erro (${login} → ${to}): ${error.message}`);
+
+        const msg = error.message.toLowerCase();
+        if (msg.includes('no lid') || msg.includes('not found') || msg.includes('not on whatsapp')) {
+            return res.status(400).json({ success: false, error: "Número sem WhatsApp ou inválido" });
+        }
+        if (msg.includes('invalid value') || msg.includes('protobuf') || msg.includes('body')) {
+            return res.status(400).json({ success: false, error: "PDF corrompido ou muito grande" });
+        }
+
+        return res.status(500).json({ success: false, error: "Erro interno ao enviar documento" });
+    }
+});
 app.get('/login', (req, res) => {
     console.log(`[HTTP] Alguém acessou /login (IP: ${req.ip})`);
     res.send(`
@@ -316,10 +496,6 @@ app.get('/login', (req, res) => {
 </html>
     `);
 });
-
-// ==========================================
-// NOVO: Processo de login (AGORA COM REDIRECIONAMENTO AUTOMÁTICO APÓS 4 TENTATIVAS)
-// ==========================================
 app.post('/login-post', async (req, res) => {
     const { user, pass } = req.body;
     if (!user) return res.send("Envie o usuário.");
@@ -462,239 +638,9 @@ app.post('/login-post', async (req, res) => {
         setTimeout(waitForQR, interval);
     })();
 });
-
-// ROTA AUXILIAR para o JavaScript da página verificar se o QR ainda existe
 app.get('/check-qr', (req, res) => {
     res.json({ hasQR: !!qrStore[req.query.user] });
 });
-
-// ==========================================
-// Funções auxiliares
-// ==========================================
-function validarUsuarioSenha(user, pass) {
-    return usuarios[user] && usuarios[user].senha === pass;
-}
-
-function pegarInstancia(user) {
-    return clientMap[user] || null;
-}
-
-// ==========================================
-// ROTA /APIWPP/send-message → MULTI-INSTÂNCIA (NÍVEL MK-AUTH 2025)
-// ==========================================
-app.post('/APIWPP/send-message', async (req, res) => {
-    const { to, msg, login, pass } = req.body;
-
-    // === LOG INICIAL ===
-    console.log(`[SEND] Requisição → Usuário: ${login} → Para: ${to}`);
-
-    // === AUTENTICAÇÃO ===
-    if (!validarUsuarioSenha(login, pass)) {
-        console.warn(`[SEND] Acesso negado - Usuário: ${login} - IP: ${req.ip}`);
-        return res.status(401).json({ success: false, error: "Login ou senha incorretos" });
-    }
-
-    // === PEGA INSTÂNCIA DO USUÁRIO ===
-    const instancia = pegarInstancia(login);
-    if (!instancia) {
-        return res.status(400).json({
-            success: false,
-            error: "Instância não iniciada. Acesse /login e escaneie o QR Code."
-        });
-    }
-
-    // === VALIDAÇÕES BÁSICAS ===
-    if (!to || !msg) {
-        return res.status(400).json({ success: false, error: "Parâmetros 'to' e 'msg' são obrigatórios" });
-    }
-
-    // === LIMPEZA DA MENSAGEM (remove HTML, XSS, etc.) ===
-    const textoLimpo = msg.toString()
-        .replace(/<[^>]*>/g, '')    // Remove qualquer HTML
-        //.replace(/\s+/g, ' ')       // Remove quebras de linha extras
-        .trim();
-
-    if (!textoLimpo) {
-        return res.status(400).json({ success: false, error: "Mensagem vazia após limpeza" });
-    }
-
-    // === FORMATA NÚMERO (BRASIL 2025) ===
-    let numero = to.replace(/\D/g, ''); // remove tudo que não é número
-
-    if (numero.length === 11) numero = '55' + numero;                    // 85999999999 → 5585999999999
-    else if (numero.length === 10) numero = '55' + numero;              // número antigo sem 9
-    else if (numero.length === 12 && numero.startsWith('55')) numero = numero; // já veio com 55
-    else if (numero.length === 13 && numero.startsWith('55')) numero = numero; // 55 + DDD + 9 + 8 dígitos
-    else {
-        return res.status(400).json({ success: false, error: "Número inválido ou formato incorreto" });
-    }
-
-    if (!/^55\d{10,11}$/.test(numero)) {
-        return res.status(400).json({ success: false, error: "Número fora do padrão brasileiro" });
-    }
-
-    const chatId = `${numero}@s.whatsapp.net`;  // ← Recomendado em 2025 (funciona com todas as versões)
-
-    try {
-        await instancia.sendMessage(chatId, textoLimpo);
-
-        // === LOG DE SUCESSO ===
-        console.info(`[SEND] Mensagem enviada → ${login} → ${numero} (${textoLimpo.length} chars)`);
-
-        // === RESPOSTA PADRÃO MK-AUTH 2025 ===
-        return res.json({
-            success: true,
-            message: "Mensagem enviada com sucesso!",
-            numero: numero,
-            preview: textoLimpo.substring(0, 80) + (textoLimpo.length > 80 ? "..." : "")
-        });
-
-    } catch (error) {
-        console.error(`[SEND] Erro (${login} → ${numero}): ${error.message}`);
-
-        const err = error.message.toLowerCase();
-
-        // === ERROS ESPECÍFICOS (iguais ao MK-AUTH oficial) ===
-        if (err.includes('no lid') ||
-            err.includes('not found') ||
-            err.includes('not on whatsapp') ||
-            err.includes('number not') ||
-            err.includes('invalid')) {
-            return res.status(400).json({
-                success: false,
-                error: "Número sem WhatsApp ou inválido"
-            });
-        }
-
-        if (err.includes('rate-overlimit') || err.includes('429')) {
-            return res.status(429).json({
-                success: false,
-                error: "Muitas mensagens. Aguarde alguns minutos."
-            });
-        }
-
-        // === ERRO GENÉRICO ===
-        return res.status(500).json({
-            success: false,
-            error: "Erro interno ao enviar mensagem"
-        });
-    }
-});
-
-app.post('/APIWPP/send-document', async (req, res) => {
-    let tempFilePath = null;
-    try {
-        const { to, caption = '', document, filename = 'boleto.pdf', login, pass } = req.body;
-
-        // === AUTENTICAÇÃO ===
-        if (!validarUsuarioSenha(login, pass)) {
-            console.warn(`[DOC] Acesso negado - Usuário: ${login} - IP: ${req.ip}`);
-            return res.status(401).json({ success: false, error: "Login ou senha incorretos" });
-        }
-
-        // === INSTÂNCIA DO USUÁRIO ===
-        const instancia = pegarInstancia(login);
-        if (!instancia) {
-            return res.status(400).json({
-                success: false,
-                error: "Instância não iniciada. Acesse /login e escaneie o QR Code."
-            });
-        }
-
-        // === VALIDAÇÕES BÁSICAS ===
-        if (!to || !document) {
-            return res.status(400).json({ success: false, error: "Parâmetros 'to' e 'document' são obrigatórios" });
-        }
-
-        // === FORMATA NÚMERO ===
-        let numero = to.replace(/\D/g, '');
-        if (numero.length === 11) numero = '55' + numero;
-        if (numero.length === 10) numero = '55' + numero; // caso venha sem o 9
-        if (!/^55\d{10,11}$/.test(numero)) {
-            return res.status(400).json({ success: false, error: "Número inválido" });
-        }
-
-        // === CORRIGE BASE64 DO MK-AUTH ===
-        const base64Clean = document
-            .replace(/^data:.+;base64,/, '')
-            .replace(/%3D/g, '=')
-            .replace(/%2F/g, '/')
-            .replace(/%2B/g, '+')
-            .replace(/%0A/g, '\n')
-            .replace(/%0D/g, '\r');
-
-        const buffer = Buffer.from(base64Clean, 'base64');
-
-        // === VALIDA TAMANHO ===
-        if (buffer.length < 5000 || buffer.length > 15 * 1024 * 1024) {
-            return res.status(400).json({ success: false, error: "PDF deve ter entre 5KB e 15MB" });
-        }
-
-        // === SALVA TEMP ===
-        tempFilePath = path.join(__dirname, `boleto_${Date.now()}_${numero.slice(-4)}.pdf`);
-        fs.writeFileSync(tempFilePath, buffer);
-        const media = MessageMedia.fromFilePath(tempFilePath);
-
-        const chatId = `${numero}@s.whatsapp.net`;
-
-        // === ENVIA DOCUMENTO ===
-        await instancia.sendMessage(chatId, media);
-
-        // === ENVIA TEXTO APÓS 2 SEGUNDOS ===
-        await new Promise(r => setTimeout(r, 2000));
-        await instancia.sendMessage(chatId, `*Segue seu boleto em anexo!*`);
-
-        // === LIMPA TEMP ===
-        fs.unlinkSync(tempFilePath);
-        tempFilePath = null;
-
-        // === SUCESSO ===
-        console.info(`[DOC] Boleto enviado por ${login} → ${numero} (${(buffer.length / 1024).toFixed(1)} KB)`);
-        return res.json({
-            success: true,
-            message: "Boleto enviado com sucesso!",
-            numero,
-            tamanho_kb: (buffer.length / 1024).toFixed(1)
-        });
-
-    } catch (error) {
-        if (tempFilePath && fs.existsSync(tempFilePath)) {
-            fs.unlinkSync(tempFilePath);
-        }
-
-        console.error(`[DOC] Erro (${login} → ${to}): ${error.message}`);
-
-        const msg = error.message.toLowerCase();
-        if (msg.includes('no lid') || msg.includes('not found') || msg.includes('not on whatsapp')) {
-            return res.status(400).json({ success: false, error: "Número sem WhatsApp ou inválido" });
-        }
-        if (msg.includes('invalid value') || msg.includes('protobuf') || msg.includes('body')) {
-            return res.status(400).json({ success: false, error: "PDF corrompido ou muito grande" });
-        }
-
-        return res.status(500).json({ success: false, error: "Erro interno ao enviar documento" });
-    }
-});
-
-// LEITOR TURBO 2025 ? 9 LINHAS, PEGA TUDO
-/**
- * app.use((req, res) => {
-    const ip = req.ip || req.socket.remoteAddress || '???';
-    const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Fortaleza' });
-    console.log('\n+------------------ WHATSAPP BOT RECEBEU ------------------');
-    console.log(` ${agora} ¦ ${req.method.padEnd(6)} ¦ ${req.path.padEnd(20)} ¦ IP: ${ip}`);
-    console.log(` Query  ?`, req.query);
-    console.log(` Body   ?`, req.body || '(vazio)');
-    console.log(` Headers? Content-Type: ${req.get('content-type') || '???'} | UA: ${req.get('user-agent')?.slice(0, 50) || '???'}`);
-    console.log('+-----------------------------------------------------------\n');
-    res.json({ ok: true, mensagem: "DADOS MOSTRADOS NO TERMINAL ? olhe aí!", recebido_as: agora });
-});
- */
-
-
-// ==========================================
-// ROTA ADMIN: /admin → Painel de administração (versão segura mínima)
-// ==========================================
 app.get('/admin', (req, res) => {
     const auth = req.headers.authorization;
     if (!auth || auth !== `Basic ${Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString('base64')}`) {
@@ -719,7 +665,7 @@ app.get('/admin', (req, res) => {
         listaUsuarios += `
         <tr>
             <td><strong>${escapeHTML(user).toUpperCase()}</strong></td>
-            <td><span style="display:inline-flex;align-items:center;gap:8px;"><span style="width:12px;height:12px;border-radius:50%;background:${conectado==='Conectado'?'#2ecc71':'#e74c3c'};box-shadow:0 0 10px ${conectado==='Conectado'?'#2ecc71':'#e74c3c'};"></span><strong style="color:${conectado==='Conectado'?'#2ecc71':'#e74c3c'};">${conectado}</strong></span></td>
+            <td><span style="display:inline-flex;align-items:center;gap:8px;"><span style="width:12px;height:12px;border-radius:50%;background:${conectado === 'Conectado' ? '#2ecc71' : '#e74c3c'};box-shadow:0 0 10px ${conectado === 'Conectado' ? '#2ecc71' : '#e74c3c'};"></span><strong style="color:${conectado === 'Conectado' ? '#2ecc71' : '#e74c3c'};">${conectado}</strong></span></td>
             <td>
                 <form method="POST" action="/admin-delete" style="display:inline;" 
                       onsubmit="return confirm('Tem certeza que quer DELETAR o usuário \\'${escapeJS(user)}\\'?')">
@@ -816,9 +762,6 @@ app.get('/admin', (req, res) => {
 </body>
 </html>`);
 });
-// ==========================================
-// Criar novo usuário
-// ==========================================
 app.post('/admin-create', (req, res) => {
     const auth = req.headers.authorization;
     if (!auth || auth !== `Basic ${Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString('base64')}`) {
@@ -840,10 +783,6 @@ app.post('/admin-create', (req, res) => {
         </script>
     `);
 });
-
-// ==========================================
-// Deletar usuário
-// ==========================================
 app.post('/admin-delete', (req, res) => {
     const auth = req.headers.authorization;
     if (!auth || auth !== `Basic ${Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString('base64')}`) {
@@ -874,8 +813,6 @@ app.post('/admin-delete', (req, res) => {
         </script>
     `);
 });
-
-// ROTA DE LOGOUT (funciona com Basic Auth também)
 app.post('/admin-logout', (req, res) => {
     // Força o navegador a pedir usuário/senha de novo na próxima vez
     res.set('WWW-Authenticate', 'Basic realm="Admin Panel"');
@@ -887,8 +824,43 @@ app.post('/admin-logout', (req, res) => {
         Você foi deslogado. Redirecionando...
     `);
 });
+/**
+ // ← COLOQUE AQUI (bem no comecinho)
+app.use((req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || '???';
+    const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Fortaleza' });
+    console.log('\n+------------------ WHATSAPP BOT RECEBEU ------------------');
+    console.log(` ${agora} ¦ ${req.method.padEnd(6)} ¦ ${req.path.padEnd(20)} ¦ IP: ${ip}`);
+    console.log(` Query  ?`, req.query);
+    console.log(` Body   ?`, req.body || '(vazio)');
+    console.log(` Headers? Content-Type: ${req.get('content-type') || '???'} | UA: ${req.get('user-agent')?.slice(0, 50) || '???'}`);
+    console.log('+-----------------------------------------------------------\n');
+    next(); // ← ESSA LINHA É OBRIGATÓRIA!!!
+});
+ */
+// ============================================= ROTA 404 – DEVE VIR ANTES DO LISTEN!!! =============================================
+app.use((req, res, next) => {
+    res.status(404).json({
+        success: false,
+        error: "Rota não encontrada",
+        path: req.path,
+        method: req.method,
+        timestamp: new Date().toISOString()
+    });
+});
 
-// Inicializa o servidor Express na porta 8000
-app.listen(8000, () => {
-    console.warn('Servidor rodando na porta 8000');
+// ============================================= ERRO GLOBAL (opcional, mas recomendado) =============================================
+app.use((err, req, res, next) => {
+    console.error("[ERRO GLOBAL]", err);
+    res.status(500).json({ success: false, error: "Erro interno do servidor" });
+});
+
+// ============================================= START DO SERVIDOR – SEMPRE POR ÚLTIMO!!! =============================================
+const PORT = process.env.PORT;
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\nSERVIDOR RODANDO COM SUCESSO NA PORTA ${PORT}`);
+    console.log(`Login →      http://45.181.8.42:${PORT}/login`);
+    console.log(`Admin →      http://45.181.8.42:${PORT}/admin`);
+    console.log(`API   → POST http://45.181.8.42:${PORT}/send-message\n`);
 });
