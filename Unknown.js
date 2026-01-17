@@ -135,25 +135,16 @@ function pegarInstancia(user) {
     return clientMap[user] || null;
 }
 app.post('/send-message', async (req, res) => {
-    // ←←← LOG MUITO VISÍVEL – SE ISSO NÃO APARECER NO TERMINAL, A REQUISIÇÃO NUNCA CHEGOU AQUI!
-    console.log('\n');
-    console.log('══════════════════════════════════════════════════════════');
-    console.log('   ROTA /send-message ACESSADA AGORA MESMO!');
-    console.log('   Horário:', new Date().toLocaleString('pt-BR', { timeZone: 'America/Fortaleza' }));
-    console.log('   IP:', req.ip || req.socket.remoteAddress);
-    console.log('   Body completo:', req.body);
-    console.log('══════════════════════════════════════════════════════════\n');
-
     const { to, msg, login, pass } = req.body;
 
     // === LOG INICIAL ===
     console.log(`[SEND] Requisição → Usuário: ${login} → Para: ${to}`);
 
     // === AUTENTICAÇÃO ===
-    // if (!validarUsuarioSenha(login, pass)) {
-    //     console.warn(`[SEND] Acesso negado - Usuário: ${login} - IP: ${req.ip}`);
-    //     return res.status(401).json({ success: false, error: "Login ou senha incorretos" });
-    // }
+    if (!validarUsuarioSenha(login, pass)) {
+        console.warn(`[SEND] Acesso negado - Usuário: ${login} - IP: ${req.ip}`);
+        return res.status(401).json({ success: false, error: "Login ou senha incorretos" });
+    }
 
     // === PEGA INSTÂNCIA DO USUÁRIO ===
     const instancia = pegarInstancia(login);
@@ -241,6 +232,7 @@ app.post('/send-message', async (req, res) => {
         });
     }
 });
+
 app.post('/send-document', async (req, res) => {
     let tempFilePath = null;
     try {
@@ -269,12 +261,12 @@ app.post('/send-document', async (req, res) => {
         // === FORMATA NÚMERO ===
         let numero = to.replace(/\D/g, '');
         if (numero.length === 11) numero = '55' + numero;
-        if (numero.length === 10) numero = '55' + numero; // caso venha sem o 9
+        if (numero.length === 10) numero = '55' + numero;
         if (!/^55\d{10,11}$/.test(numero)) {
             return res.status(400).json({ success: false, error: "Número inválido" });
         }
 
-        // === CORRIGE BASE64 DO MK-AUTH ===
+        // === CORRIGE BASE64 ===
         const base64Clean = document
             .replace(/^data:.+;base64,/, '')
             .replace(/%3D/g, '=')
@@ -297,19 +289,53 @@ app.post('/send-document', async (req, res) => {
 
         const chatId = `${numero}@s.whatsapp.net`;
 
-        // === ENVIA DOCUMENTO ===
+        // === ENVIA BOLETO ===
         await instancia.sendMessage(chatId, media);
 
-        // === ENVIA TEXTO APÓS 2 SEGUNDOS ===
-        await new Promise(r => setTimeout(r, 2000));
-        await instancia.sendMessage(chatId, `*Segue seu boleto em anexo!*`);
+        // === ENVIA TEXTO DO BOLETO ===
+        //await new Promise(r => setTimeout(r, 2000));
+        //await instancia.sendMessage(chatId, `*Segue seu boleto em anexo!*`);
+
+        // === ENVIA VÍDEO TUTORIAL COMO DOCUMENTO (SOLUÇÃO PARA VPS) ===
+        const videoPath = path.join(__dirname, 'videos', 'Video_Explicativo.mp4');
+        console.log(`[DOC] Caminho completo do vídeo: ${videoPath}`);
+        console.log(`[DOC] Vídeo existe no servidor? ${fs.existsSync(videoPath)}`);
+
+        if (fs.existsSync(videoPath)) {
+            try {
+                const stats = fs.statSync(videoPath);
+                console.log(`[DOC] Tamanho do vídeo: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+
+                await new Promise(r => setTimeout(r, 5000)); // delay maior pra garantir
+
+                const videoMedia = MessageMedia.fromFilePath(videoPath);
+                videoMedia.mimetype = 'video/mp4';
+                videoMedia.filename = 'Video_Explicativo.mp4'; // nome bonito que aparece pro cliente
+
+                await instancia.sendMessage(chatId, videoMedia, {
+                    caption: '✅ Vídeo explicando como pagar pelo link Novo! 🎥',
+                    sendMediaAsDocument: true   // ← ESSA LINHA É A CORREÇÃO PRINCIPAL
+                });
+
+                console.info(`[DOC] ✅ Vídeo tutorial enviado como documento com sucesso para ${numero}`);
+            } catch (videoError) {
+                console.error(`[DOC] ❌ ERRO AO ENVIAR VÍDEO (como documento) para ${numero}:`, videoError.message);
+                console.error(`[DOC] Stack:`, videoError.stack);
+
+                // Fallback
+                await instancia.sendMessage(chatId, 'Desculpe, não consegui enviar o vídeo explicativo agora. 😔');
+            }
+        } else {
+            console.warn(`[DOC] ⚠️ Vídeo não encontrado. Pulando envio.`);
+        }
 
         // === LIMPA TEMP ===
-        fs.unlinkSync(tempFilePath);
-        tempFilePath = null;
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+        }
 
         // === SUCESSO ===
-        console.info(`[DOC] Boleto enviado por ${login} → ${numero} (${(buffer.length / 1024).toFixed(1)} KB)`);
+        console.info(`[DOC] Boleto (+ vídeo como documento) enviado por ${login} → ${numero} (${(buffer.length / 1024).toFixed(1)} KB)`);
         return res.json({
             success: true,
             message: "Boleto enviado com sucesso!",
@@ -322,7 +348,10 @@ app.post('/send-document', async (req, res) => {
             fs.unlinkSync(tempFilePath);
         }
 
-        console.error(`[DOC] Erro (${login} → ${to}): ${error.message}`);
+        const loginLog = req.body.login || 'desconhecido';
+        const toLog = req.body.to || 'desconhecido';
+
+        console.error(`[DOC] Erro grave (${loginLog} → ${toLog}): ${error.message}`);
 
         const msg = error.message.toLowerCase();
         if (msg.includes('no lid') || msg.includes('not found') || msg.includes('not on whatsapp')) {
@@ -335,6 +364,7 @@ app.post('/send-document', async (req, res) => {
         return res.status(500).json({ success: false, error: "Erro interno ao enviar documento" });
     }
 });
+
 app.get('/login', (req, res) => {
     console.log(`[HTTP] Alguém acessou /login (IP: ${req.ip})`);
     res.send(`
@@ -860,7 +890,7 @@ const PORT = process.env.PORT;
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\nSERVIDOR RODANDO COM SUCESSO NA PORTA ${PORT}`);
-    console.log(`Login →      http://45.181.8.42:${PORT}/login`);
-    console.log(`Admin →      http://45.181.8.42:${PORT}/admin`);
-    console.log(`API   → POST http://45.181.8.42:${PORT}/send-message\n`);
+    console.log(`Login →      http://201.182.96.101:${PORT}/login`);
+    console.log(`Admin →      http://201.182.96.101:${PORT}/admin`);
+    console.log(`API   → POST http://201.182.96.101:${PORT}/send-message\n`);
 });
