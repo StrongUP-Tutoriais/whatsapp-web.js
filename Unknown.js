@@ -40,11 +40,16 @@ function criarInstancia(usuario) {
     const qrAttempts = { count: 0, timeout: null };
     const MAX_QR_ATTEMPTS = 4;        // Máximo 4 QRs (recomendado em produção)
     const QR_EXPIRE_TIME = 60000;     // 60 segundos por QR
-
+//===================INIT CLIENTE ====================================//
     const client = new Client({
         authStrategy: new LocalAuth({ client: usuario, dataPath: sessionPath }),
         puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true },
+	        webVersionCache: {
+            type: 'remote',
+            remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/refs/heads/main/html/2.3000.1031490220-alpha.html`,    
+        },
     });
+
 
 
     client.on("qr", (qr) => {
