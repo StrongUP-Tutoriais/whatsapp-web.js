@@ -43,14 +43,16 @@ function criarInstancia(usuario) {
 //===================INIT CLIENTE ====================================//
     const client = new Client({
         authStrategy: new LocalAuth({ client: usuario, dataPath: sessionPath }),
-        puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true },
+        puppeteer: { 
+		args: ['--no-sandbox', '--disable-setuid-sandbox'], 
+		executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
+		headless: true 
+		},
 	        webVersionCache: {
             type: 'remote',
             remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/refs/heads/main/html/2.3000.1031490220-alpha.html`,    
         },
     });
-
-
 
     client.on("qr", (qr) => {
         qrAttempts.count++;
