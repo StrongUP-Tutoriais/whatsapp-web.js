@@ -67,19 +67,20 @@ echo -e "${GREEN}✅ Dependências instaladas com sucesso!${RESET}\n"
 # ==============================
 # Inicia aplicação
 # ==============================
-if [ -f "Unknown.js" ]; then
-  echo -e "${BLUE}⚡ Iniciando ${YELLOW}Unknown.js${RESET}"
-  if ! pm2 start Unknown.js --name "meu-app" >>"$LOGFILE" 2>&1; then
-    echo -e "${RED}❌ Erro ao iniciar Unknown.js${RESET}"
-    kill $anim_pid 2>/dev/null
-    exit 1
-  fi
-  echo -e "${GREEN}🚀 Aplicação está rodando no PM2!${RESET}"
-else
-  echo -e "${RED}❌ Arquivo Unknown.js não encontrado!${RESET}"
-  kill $anim_pid 2>/dev/null
-  exit 1
-fi
+
+# if [ -f "Unknown.js" ]; then
+#  echo -e "${BLUE}⚡ Iniciando ${YELLOW}Unknown.js${RESET}"
+#  if ! pm2 start Unknown.js --name "meu-app" >>"$LOGFILE" 2>&1; then
+#    echo -e "${RED}❌ Erro ao iniciar Unknown.js${RESET}"
+#    kill $anim_pid 2>/dev/null
+#    exit 1
+#  fi
+#  echo -e "${GREEN}🚀 Aplicação está rodando no PM2!${RESET}"
+#else
+#  echo -e "${RED}❌ Arquivo Unknown.js não encontrado!${RESET}"
+#  kill $anim_pid 2>/dev/null
+#  exit 1
+#fi
 
 # ==============================
 # Finalização
