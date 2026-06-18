@@ -6,6 +6,7 @@ const qrcodeterm = require("qrcode-terminal");
 const QRCode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
+const bcrypt = require('bcrypt');
 require('dotenv').config();   // ? ESSA LINHA LÊ O ARQUIVO .env
 
 const app = express();
@@ -44,13 +45,13 @@ function criarInstancia(usuario) {
     const client = new Client({
         authStrategy: new LocalAuth({ client: usuario, dataPath: sessionPath }),
         puppeteer: { 
-		args: ['--no-sandbox', '--disable-setuid-sandbox'], 
-		executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
-		headless: true 
+		args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'], 
+		headless: true,
+		...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {})
 		},
 	        webVersionCache: {
             type: 'remote',
-            remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/refs/heads/main/html/2.3000.1031490220-alpha.html`,    
+            remotePath: process.env.WA_VERSION_URL || `https://raw.githubusercontent.com/wppconnect-team/wa-version/refs/heads/main/html/2.3000.1031490220-alpha.html`,    
         },
     });
 
@@ -95,17 +96,49 @@ function criarInstancia(usuario) {
         console.log(`[FALHA] Autenticação falhou → ${usuario}: ${msg}`);
     });
 
-    client.on("disconnected", (reason) => {
-        console.log(`[DESCONECTADO] ${usuario} | Motivo: ${reason}`);
+client.on("disconnected", (reason) => {
+    console.log(`[DESCONECTADO] ${usuario} | Motivo: ${reason}`);
 
-        // Se foi logout manual ou sessão inválida → não reconecta
-        if (reason === "invalid_session" || reason === "logged_out") {
-            console.log(`[PARADO] Sessão inválida. Não será reconectado automaticamente.`);
-            delete clientMap[usuario];
-            delete qrStore[usuario];
-            fs.rmSync(sessionPath, { recursive: true, force: true });
+    // limpa QR sempre que desconecta
+    delete qrStore[usuario];
+
+    if (reason === "invalid_session" || reason === "logged_out") {
+        console.log(`[PARADO] Sessão inválida. Não será reconectado automaticamente.`);
+        delete clientMap[usuario];
+        fs.rmSync(sessionPath, { recursive: true, force: true });
+    } else if (["NAVIGATION","TIMEOUT"].includes(reason)) {
+        console.log(`[RECONNECT] Desconexão temporária (${reason}). Limpando instância.`);
+        delete clientMap[usuario];
+        // mantém a pasta da sessão para tentar reconectar sem novo QR
+    }
+});
+
+// === LOGA QUEM TE MANDOU MENSAGEM ===
+client.on('message', async (msg) => {
+    try {
+        if (msg.fromMe) return;
+
+        const isGrupo = msg.from.endsWith('@g.us');
+
+        if (isGrupo) {
+            const chat = await msg.getChat();
+            const contato = await msg.getContact();
+            const nomeGrupo = chat.name || 'Grupo';
+            const nomePessoa = contato.pushname || contato.name || 'Desconhecido';
+            const numero = contato.id.user;
+
+            console.log('[MSG GRUPO] ' + usuario + ' ← ' + nomeGrupo + ' | ' + nomePessoa + ' (' + numero + '): ' + msg.body);
+        } else {
+            const contato = await msg.getContact();
+            const nome = contato.pushname || contato.name || 'Desconhecido';
+            const numero = contato.id.user || msg.from.split('@')[0]; // <-- AGORA IGUAL AO GRUPO
+
+            console.log('[MSG PV] ' + usuario + ' ← ' + nome + ' (' + numero + '): ' + msg.body);
         }
-    });
+    } catch (e) {
+        console.log('[MSG RECEBIDA] ' + usuario + ' ← ' + msg.from + ': ' + msg.body);
+    }
+});
 
     // Garante pasta da sessão
     try {
@@ -122,8 +155,12 @@ function criarInstancia(usuario) {
 }
 const ADMIN_USER = process.env.ADMIN_USER;
 const ADMIN_PASS = process.env.ADMIN_PASS;
+if (!ADMIN_USER || !ADMIN_PASS) {
+    console.error('[ERRO] Defina ADMIN_USER e ADMIN_PASS no arquivo .env');
+    process.exit(1);
+}
 if (!usuarios[ADMIN_USER]) {
-    usuarios[ADMIN_USER] = { senha: ADMIN_PASS };
+    usuarios[ADMIN_USER] = { senha: bcrypt.hashSync(ADMIN_PASS, 10) };
     fs.writeFileSync(usersFilePath, JSON.stringify(usuarios, null, 2));
     console.log(`[ADMIN] Usuário admin criado → ${ADMIN_USER}`);
 }
@@ -136,10 +173,34 @@ adminClient.on('qr', () => clientStatus = 'qr');
 adminClient.on('disconnected', () => clientStatus = 'disconnected');
 
 function validarUsuarioSenha(user, pass) {
-    return usuarios[user] && usuarios[user].senha === pass;
+    const u = usuarios[user];
+    if (!u || !u.senha) return false;
+    const hash = u.senha;
+    // bcrypt hash
+    if (hash.startsWith('$2')) {
+        return bcrypt.compareSync(pass, hash);
+    }
+    // compatibilidade com senha em texto puro - valida e migra
+    if (hash === pass) {
+        u.senha = bcrypt.hashSync(pass, 10);
+        fs.writeFileSync(usersFilePath, JSON.stringify(usuarios, null, 2));
+        console.log(`[MIGRAÇÃO] Senha de ${user} migrada para bcrypt`);
+        return true;
+    }
+    return false;
 }
 function pegarInstancia(user) {
     return clientMap[user] || null;
+}
+
+function requireAdmin(req, res, next) {
+    const auth = req.headers.authorization;
+    const expected = 'Basic ' + Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString('base64');
+    if (!auth || auth !== expected) {
+        res.set('WWW-Authenticate', 'Basic realm="Admin Panel"');
+        return res.status(401).send('Acesso negado');
+    }
+    next();
 }
 app.post('/send-message', async (req, res) => {
     const { to, msg, login, pass } = req.body;
@@ -536,10 +597,9 @@ app.get('/login', (req, res) => {
 app.post('/login-post', async (req, res) => {
     const { user, pass } = req.body;
     if (!user) return res.send("Envie o usuário.");
-    if (!usuarios[user]) return res.send("Usuário não encontrado.");
-    if (usuarios[user].senha !== pass) {
+    if (!validarUsuarioSenha(user, pass)) {
         console.log(`[LOGIN] Senha incorreta para: ${user}`);
-        return res.send("Senha incorreta.");
+        return res.send("Usuário não encontrado ou senha incorreta.");
     }
     criarInstancia(user);
 
@@ -678,12 +738,7 @@ app.post('/login-post', async (req, res) => {
 app.get('/check-qr', (req, res) => {
     res.json({ hasQR: !!qrStore[req.query.user] });
 });
-app.get('/admin', (req, res) => {
-    const auth = req.headers.authorization;
-    if (!auth || auth !== `Basic ${Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString('base64')}`) {
-        res.set('WWW-Authenticate', 'Basic realm="Admin Panel"');
-        return res.status(401).send('Acesso negado');
-    }
+app.get('/admin', requireAdmin, (req, res) => {
 
     // Escape seguro para HTML e para atributos JavaScript
     const escapeHTML = (str) => String(str).replace(/[&<>"']/g, m => ({
@@ -761,7 +816,7 @@ app.get('/admin', (req, res) => {
 <body>
     <div class="container">
         <form action="/admin-logout" method="POST" style="display:inline;">
-  <button type="submit" class="background:#e74c3c;padding:10px 20px;border:none;border-radius:30px;color:white;font-weight:600;cursor:pointer;" 
+  <button type="submit" style="background:#e74c3c;padding:10px 20px;border:none;border-radius:30px;color:white;font-weight:600;cursor:pointer;" 
           onclick="return confirm('Tem certeza que quer sair?')">
     Sair
   </button>
@@ -799,17 +854,13 @@ app.get('/admin', (req, res) => {
 </body>
 </html>`);
 });
-app.post('/admin-create', (req, res) => {
-    const auth = req.headers.authorization;
-    if (!auth || auth !== `Basic ${Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString('base64')}`) {
-        return res.status(401).send('Acesso negado');
-    }
+app.post('/admin-create', requireAdmin, (req, res) => {
 
     const { user, pass } = req.body;
     if (!user || !pass) return res.send('Preencha usuário e senha');
     if (usuarios[user]) return res.send(`Usuário "${user}" já existe!`);
 
-    usuarios[user] = { senha: pass };
+    usuarios[user] = { senha: bcrypt.hashSync(pass, 10) };
     fs.writeFileSync(usersFilePath, JSON.stringify(usuarios, null, 2));
     console.log(`[ADMIN] Novo cliente criado: ${user}`);
 
@@ -820,11 +871,7 @@ app.post('/admin-create', (req, res) => {
         </script>
     `);
 });
-app.post('/admin-delete', (req, res) => {
-    const auth = req.headers.authorization;
-    if (!auth || auth !== `Basic ${Buffer.from(`${ADMIN_USER}:${ADMIN_PASS}`).toString('base64')}`) {
-        return res.status(401).send('Acesso negado');
-    }
+app.post('/admin-delete', requireAdmin, (req, res) => {
 
     const { user } = req.body;
     if (!user || user === ADMIN_USER) return res.send('Erro: não pode deletar este usuário');
@@ -893,11 +940,12 @@ app.use((err, req, res, next) => {
 });
 
 // ============================================= START DO SERVIDOR – SEMPRE POR ÚLTIMO!!! =============================================
-const PORT = process.env.PORT;
+const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\nSERVIDOR RODANDO COM SUCESSO NA PORTA ${PORT}`);
-    console.log(`Login →      http://201.182.96.101:${PORT}/login`);
-    console.log(`Admin →      http://201.182.96.101:${PORT}/admin`);
-    console.log(`API   → POST http://201.182.96.101:${PORT}/send-message\n`);
+    const host = process.env.HOST_IP || 'localhost';
+    console.log(`Login →      http://${host}:${PORT}/login`);
+    console.log(`Admin →      http://${host}:${PORT}/admin`);
+    console.log(`API   → POST http://${host}:${PORT}/send-message\n`);
 });
