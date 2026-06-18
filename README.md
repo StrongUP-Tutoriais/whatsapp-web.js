@@ -102,8 +102,8 @@ client.on('message', async (msg) => {
 
 Saída no terminal:
 ```
-[MSG PV] admin ← Vaneza Karen (558588813026): c
-[MSG GRUPO] admin ← Meular | Vaneza Karen (558588813026): 1
+[MSG PV] admin ← Vaneza Karen (558588813826): c
+[MSG GRUPO] admin ← Meular | Vaneza Karen (558588813826): 1
 ```
 
 ## 🛡️ Segurança Implementada
