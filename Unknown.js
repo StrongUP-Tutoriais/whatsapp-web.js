@@ -20,6 +20,26 @@ const qrStore = {};
 const usersFilePath = path.join(__dirname, "usuarios.json");
 let usuarios = {};
 
+
+
+
+const horariosPath = path.join(__dirname, 'horarios.json');
+let configHorario = { segSex: [8, 18], sab: [8, 12], feriados: [] };
+try {
+    if (fs.existsSync(horariosPath)) {
+        configHorario = JSON.parse(fs.readFileSync(horariosPath));
+    } else {
+        fs.writeFileSync(horariosPath, JSON.stringify(configHorario, null, 2));
+    }
+} catch (e) { console.log('[ERRO] horarios.json:', e.message); }
+
+const logPath = path.join(__dirname, 'atendimentos.log');
+const ultimoReply = {}; // anti-flood dentro do horário
+const ultimoFora = {}; // 3) responde fora só 1x por dia
+
+
+
+
 if (fs.existsSync(usersFilePath)) {
     usuarios = JSON.parse(fs.readFileSync(usersFilePath));
     console.log(`[LOG] usuarios.json carregado → ${Object.keys(usuarios).length} usuário(s) encontrado(s)`);
@@ -41,17 +61,17 @@ function criarInstancia(usuario) {
     const qrAttempts = { count: 0, timeout: null };
     const MAX_QR_ATTEMPTS = 4;        // Máximo 4 QRs (recomendado em produção)
     const QR_EXPIRE_TIME = 60000;     // 60 segundos por QR
-//===================INIT CLIENTE ====================================//
+    //===================INIT CLIENTE ====================================//
     const client = new Client({
         authStrategy: new LocalAuth({ client: usuario, dataPath: sessionPath }),
-        puppeteer: { 
-		args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'], 
-		headless: true,
-		...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {})
-		},
-	        webVersionCache: {
+        puppeteer: {
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+            headless: true,
+            ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {})
+        },
+        webVersionCache: {
             type: 'remote',
-            remotePath: process.env.WA_VERSION_URL || `https://raw.githubusercontent.com/wppconnect-team/wa-version/refs/heads/main/html/2.3000.1031490220-alpha.html`,    
+            remotePath: process.env.WA_VERSION_URL || `https://raw.githubusercontent.com/wppconnect-team/wa-version/refs/heads/main/html/2.3000.1031490220-alpha.html`,
         },
     });
 
@@ -96,49 +116,147 @@ function criarInstancia(usuario) {
         console.log(`[FALHA] Autenticação falhou → ${usuario}: ${msg}`);
     });
 
-client.on("disconnected", (reason) => {
-    console.log(`[DESCONECTADO] ${usuario} | Motivo: ${reason}`);
+    client.on("disconnected", (reason) => {
+        console.log(`[DESCONECTADO] ${usuario} | Motivo: ${reason}`);
 
-    // limpa QR sempre que desconecta
-    delete qrStore[usuario];
+        // limpa QR sempre que desconecta
+        delete qrStore[usuario];
 
-    if (reason === "invalid_session" || reason === "logged_out") {
-        console.log(`[PARADO] Sessão inválida. Não será reconectado automaticamente.`);
-        delete clientMap[usuario];
-        fs.rmSync(sessionPath, { recursive: true, force: true });
-    } else if (["NAVIGATION","TIMEOUT"].includes(reason)) {
-        console.log(`[RECONNECT] Desconexão temporária (${reason}). Limpando instância.`);
-        delete clientMap[usuario];
-        // mantém a pasta da sessão para tentar reconectar sem novo QR
-    }
-});
+        if (reason === "invalid_session" || reason === "logged_out") {
+            console.log(`[PARADO] Sessão inválida. Não será reconectado automaticamente.`);
+            delete clientMap[usuario];
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+        } else if (["NAVIGATION", "TIMEOUT"].includes(reason)) {
+            console.log(`[RECONNECT] Desconexão temporária (${reason}). Limpando instância.`);
+            delete clientMap[usuario];
+            // mantém a pasta da sessão para tentar reconectar sem novo QR
+        }
+    });
 
-// === LOGA QUEM TE MANDOU MENSAGEM ===
-client.on('message', async (msg) => {
-    try {
-        if (msg.fromMe) return;
 
-        const isGrupo = msg.from.endsWith('@g.us');
 
-        if (isGrupo) {
-            const chat = await msg.getChat();
-            const contato = await msg.getContact();
-            const nomeGrupo = chat.name || 'Grupo';
-            const nomePessoa = contato.pushname || contato.name || 'Desconhecido';
-            const numero = contato.id.user;
 
-            console.log('[MSG GRUPO] ' + usuario + ' ← ' + nomeGrupo + ' | ' + nomePessoa + ' (' + numero + '): ' + msg.body);
-        } else {
+    client.on('message', async (msg) => {
+        try {
+            if (msg.fromMe) return;
+
+            if (!msg.body && !msg.hasMedia) return; // ignora notificações vazias
+            if (msg.from === 'status@broadcast') return; // <--- NÃO responde status
+            if (msg.isStatus) return; // <--- garante
+            const isGrupo = msg.from.endsWith('@g.us');
             const contato = await msg.getContact();
             const nome = contato.pushname || contato.name || 'Desconhecido';
-            const numero = contato.id.user || msg.from.split('@')[0]; // <-- AGORA IGUAL AO GRUPO
+            const numero = contato.id.user || msg.from.split('@')[0];
+            const texto = (msg.body || '').trim();
+            const tz = 'America/Sao_Paulo';
+            const agora = new Date();
 
-            console.log('[MSG PV] ' + usuario + ' ← ' + nome + ' (' + numero + '): ' + msg.body);
+            // log no console
+            if (isGrupo) {
+                const chat = await msg.getChat();
+                console.log('[MSG GRUPO] ' + usuario + ' ← ' + (chat.name || 'Grupo') + ' | ' + nome + ' (' + numero + '): ' + texto);
+                return;
+            } else {
+                console.log('[MSG PV] ' + usuario + ' ← ' + nome + ' (' + numero + '): ' + texto);
+            }
+
+            // BLOQUEIO ANTI-FLOOD - 3 minutos para QUALQUER resposta automática
+            const agoraMs = Date.now();
+            if (ultimoReply[msg.from] && agoraMs - ultimoReply[msg.from] < 240 * 60 * 1000) {
+                return;
+            }
+
+            // 4) LOG EM ARQUIVO
+            const timestamp = new Date().toLocaleString('pt-BR', { timeZone: tz });
+            const dataISO = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(agora);
+            const logLine = `[${timestamp}] ${usuario} | ${nome} (${numero}) | ${texto}\n`;
+            fs.appendFileSync(logPath, logLine);
+
+/**
+ *             // 5) DETECTAR MÍDIA
+            if (msg.hasMedia) {
+                await msg.reply('Recebi sua mídia (foto, áudio ou arquivo). Vou analisar e te respondo no horário de atendimento.');
+                ultimoReply[msg.from] = Date.now(); // depois do reply
+                fs.appendFileSync(logPath, `[${timestamp}] ${usuario} | MÍDIA recebida de ${numero}\n`);
+                return;
+            }
+ */
+
+            // REGEX internet (mantido)
+            const regexInternet = /(jaco|jacó)?\s*(to|tô|estou|fiquei|ficou)?\s*sem\s+(internet|net|wifi|wi-?fi)/i;
+            if (regexInternet.test(texto)) {
+                await msg.reply('Já desligou e ligou o roteador na tomada? Faça isso, aguarde 2 minutos e me avise se voltou.');
+                ultimoReply[msg.from] = Date.now(); // <-- aqui dentro
+                return;
+            }
+
+            // HORÁRIO
+            const partes = new Intl.DateTimeFormat('pt-BR', { timeZone: tz, weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(agora);
+            const get = t => partes.find(p => p.type === t)?.value;
+            const hora = Number(get('hour'));
+            const minuto = Number(get('minute'));
+            const diaNum = new Date(agora.toLocaleString('en-US', { timeZone: tz })).getDay();
+
+            let dentro = false;
+            if (diaNum >= 1 && diaNum <= 5) dentro = hora >= configHorario.segSex[0] && hora < configHorario.segSex[1];
+            if (diaNum === 6) dentro = hora >= configHorario.sab[0] && hora < configHorario.sab[1];
+            if (configHorario.feriados.includes(dataISO)) dentro = false; // feriado fecha
+
+            const horaFmt = `${hora}h${String(minuto).padStart(2, '0')}`;
+            //const msgDentro = `Olá ${nome}! Agora são ${horaFmt} (horário de Brasília). Estamos em horário de atendimento e já recebemos sua mensagem. Te respondemos em instantes.`;
+            const msgFora = `Olá ${nome}! Agora são ${horaFmt} (horário de Brasília). Estamos fora do horário de atendimento. Nosso horário é seg a sex das ${configHorario.segSex[0]}h às ${configHorario.segSex[1]}h e sábado das ${configHorario.sab[0]}h às ${configHorario.sab[1]}h. Deixe sua mensagem que retornamos no próximo expediente.`;
+
+            // 3) FORA DO HORÁRIO: responde só 1 vez por dia
+            if (!dentro) {
+                if (ultimoFora[msg.from] === dataISO) return;
+                await msg.reply(msgFora);
+                ultimoFora[msg.from] = dataISO;
+                ultimoReply[msg.from] = Date.now();
+                return;
+            }
+
+            // DENTRO: anti-flood 3 minutos
+            if (ultimoReply[msg.from] && (Date.now() - ultimoReply[msg.from] < 3 * 60 * 1000)) return;
+            await msg.reply(msgDentro);
+            ultimoReply[msg.from] = Date.now();
+
+        } catch (e) {
+            console.log('[MSG RECEBIDA] ' + usuario + ' ← ' + msg.from + ': ' + msg.body + ' | ERRO: ' + e.message);
         }
-    } catch (e) {
-        console.log('[MSG RECEBIDA] ' + usuario + ' ← ' + msg.from + ': ' + msg.body);
-    }
-});
+    });
+
+
+
+    /**
+     * // === LOGA QUEM TE MANDOU MENSAGEM ===
+    client.on('message', async (msg) => {
+        try {
+            if (msg.fromMe) return;
+    
+            const isGrupo = msg.from.endsWith('@g.us');
+    
+            if (isGrupo) {
+                const chat = await msg.getChat();
+                const contato = await msg.getContact();
+                const nomeGrupo = chat.name || 'Grupo';
+                const nomePessoa = contato.pushname || contato.name || 'Desconhecido';
+                const numero = contato.id.user;
+    
+                console.log('[MSG GRUPO] ' + usuario + ' ← ' + nomeGrupo + ' | ' + nomePessoa + ' (' + numero + '): ' + msg.body);
+            } else {
+                const contato = await msg.getContact();
+                const nome = contato.pushname || contato.name || 'Desconhecido';
+                const numero = contato.id.user || msg.from.split('@')[0]; // <-- AGORA IGUAL AO GRUPO
+    
+                console.log('[MSG PV] ' + usuario + ' ← ' + nome + ' (' + numero + '): ' + msg.body);
+            }
+        } catch (e) {
+            console.log('[MSG RECEBIDA] ' + usuario + ' ← ' + msg.from + ': ' + msg.body);
+        }
+    });
+     * 
+     */
+
 
     // Garante pasta da sessão
     try {
