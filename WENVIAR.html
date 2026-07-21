@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Enviar WhatsApp - Jaco</title>
+    <style>
+        body { font-family: Arial; background: #f0f2f5; padding: 50px; }
+        center { background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); max-width: 500px; margin: auto; }
+        h2 { color: #128C7E; }
+        button { 
+            background: #25D366; 
+            color: white; 
+            font-size: bold 22px Arial; 
+            padding: 20px 40px; 
+            border: none; 
+            border-radius: 12px; 
+            cursor: pointer; 
+            margin-top: 20px;
+            transition: 0.3s;
+        }
+        button:hover { background: #128C7E; transform: scale(1.05); }
+    </style>
+</head>
+<body>
+
+<center>
+    <h2>Enviar Mensagem no WhatsApp</h2>
+    <p><b>Usuário:</b> jaco</p>
+    <p><b>Destino:</b> (85) 98881-3026</p>
+
+    <form method="POST" action="http://45.181.8.42:8000/send-message">
+	<!--http://201.182.96.101/:8000/APIWPP/send-message -->
+        <input type="hidden" name="login" value="admin">
+        <input type="hidden" name="pass"  value="3233233">
+        <input type="hidden" name="to"    value="+558585304415@s.whatsapp.net">  <!-- só DDD + número -->
+        <input type="hidden" name="msg"   value="TESTE SERVIDOR DE MENSAGEM">
+
+        <button type="submit">ENVIAR AGORA</button>
+    </form>
+
+    <br><br>
+    <small>Se não redirecionar, <a href="javascript:window.close()">feche esta aba</a></small>
+</center>
+
+<!-- ENVIO AUTOMÁTICO (opcional - remove se quiser só botão) -->
+<!-- <script> setTimeout(() => document.querySelector('form').submit(), 1000); </script> -->
+
+</body>
+</html>

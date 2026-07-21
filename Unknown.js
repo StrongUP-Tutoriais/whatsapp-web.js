@@ -2,6 +2,7 @@
 require("./auto-loader");
 const express = require('express');
 const { Client, Location, Poll, List, Buttons, LocalAuth, MessageMedia } = require('./index');
+const qrcodeterm = require("qrcode-terminal");
 const QRCode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
@@ -18,6 +19,23 @@ const qrStore = {};
 
 const usersFilePath = path.join(__dirname, "usuarios.json");
 let usuarios = {};
+
+
+
+
+const horariosPath = path.join(__dirname, 'horarios.json');
+let configHorario = { segSex: [8, 18], sab: [8, 12], feriados: [] };
+try {
+    if (fs.existsSync(horariosPath)) {
+        configHorario = JSON.parse(fs.readFileSync(horariosPath));
+    } else {
+        fs.writeFileSync(horariosPath, JSON.stringify(configHorario, null, 2));
+    }
+} catch (e) { console.log('[ERRO] horarios.json:', e.message); }
+
+const logPath = path.join(__dirname, 'atendimentos.log');
+const ultimoReply = {}; // anti-flood dentro do horário
+const ultimoFora = {}; // 3) responde fora só 1x por dia
 
 
 
@@ -69,6 +87,7 @@ function criarInstancia(usuario) {
         }
 
         console.log(`QR CODE ${qrAttempts.count}/${MAX_QR_ATTEMPTS} → ${usuario.toUpperCase()}`);
+        // qrcodeterm.generate(qr, { small: true });
         qrStore[usuario] = qr;
 
         // Limpa timeout antigo
@@ -115,35 +134,32 @@ function criarInstancia(usuario) {
     });
 
 
-    /**
-     * // === LOGA QUEM TE MANDOU MENSAGEM ===
+    // === LOGA QUEM TE MANDOU MENSAGEM ===
     client.on('message', async (msg) => {
         try {
             if (msg.fromMe) return;
-    
+
             const isGrupo = msg.from.endsWith('@g.us');
-    
+
             if (isGrupo) {
                 const chat = await msg.getChat();
                 const contato = await msg.getContact();
                 const nomeGrupo = chat.name || 'Grupo';
                 const nomePessoa = contato.pushname || contato.name || 'Desconhecido';
                 const numero = contato.id.user;
-    
+
                 console.log('[MSG GRUPO] ' + usuario + ' ← ' + nomeGrupo + ' | ' + nomePessoa + ' (' + numero + '): ' + msg.body);
             } else {
                 const contato = await msg.getContact();
                 const nome = contato.pushname || contato.name || 'Desconhecido';
                 const numero = contato.id.user || msg.from.split('@')[0]; // <-- AGORA IGUAL AO GRUPO
-    
+
                 console.log('[MSG PV] ' + usuario + ' ← ' + nome + ' (' + numero + '): ' + msg.body);
             }
         } catch (e) {
             console.log('[MSG RECEBIDA] ' + usuario + ' ← ' + msg.from + ': ' + msg.body);
         }
     });
-     * 
-     */
 
 
     // Garante pasta da sessão
