@@ -1,8 +1,8 @@
 // Importação dos módulos necessários
 require("./auto-loader");
 const express = require('express');
-const { Client, Location, Poll, List, Buttons, LocalAuth, MessageMedia } = require('./index');
-const qrcodeterm = require("qrcode-terminal");
+const { Client, LocalAuth, MessageMedia } = require('./index');
+
 const QRCode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
@@ -16,28 +16,18 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' })); // ← PARA LER 
 
 const clientMap = {};
 const qrStore = {};
+const MAX_INSTANCES = parseInt(process.env.MAX_INSTANCES || '5'); // 5 pra VPS de 1GB, 10 pra 2GB+
+let launchesEmAndamento = 0;
+const launchQueue = [];
 
 const usersFilePath = path.join(__dirname, "usuarios.json");
 let usuarios = {};
 
 
 
-
-const horariosPath = path.join(__dirname, 'horarios.json');
-let configHorario = { segSex: [8, 18], sab: [8, 12], feriados: [] };
-try {
-    if (fs.existsSync(horariosPath)) {
-        configHorario = JSON.parse(fs.readFileSync(horariosPath));
-    } else {
-        fs.writeFileSync(horariosPath, JSON.stringify(configHorario, null, 2));
-    }
-} catch (e) { console.log('[ERRO] horarios.json:', e.message); }
-
-const logPath = path.join(__dirname, 'atendimentos.log');
-const ultimoReply = {}; // anti-flood dentro do horário
-const ultimoFora = {}; // 3) responde fora só 1x por dia
-
-
+const rateLimit = require('express-rate-limit');
+app.use('/send-message', rateLimit({ windowMs: 60000, max: 30 }))
+app.use('/login-post', rateLimit({ windowMs: 60000, max: 10 }))
 
 
 if (fs.existsSync(usersFilePath)) {
@@ -49,25 +39,42 @@ if (fs.existsSync(usersFilePath)) {
 }
 
 function criarInstancia(usuario) {
+    // Se já existe, retorna
     if (clientMap[usuario]) {
         return clientMap[usuario];
     }
 
-    console.log(`[INSTÂNCIA] Criando nova instância para: ${usuario}`);
+    // Admin não conta no limite
+    const isAdmin = usuario === ADMIN_USER;
+    const totalAtivas = Object.keys(clientMap).filter(u => u!== ADMIN_USER).length;
+
+    if (!isAdmin && totalAtivas >= MAX_INSTANCES) {
+        console.log(`[LIMITE] Recusado ${usuario} - ${totalAtivas}/${MAX_INSTANCES} ativas`);
+        const err = new Error('LIMITE_INSTANCIAS');
+        err.code = 'LIMITE_INSTANCIAS';
+        throw err;
+    }
+
+    // Evita 2 Chromes abrindo pro mesmo usuário ao mesmo tempo
+    if (qrStore[usuario + '_launching']) {
+        console.log(`[FILA] ${usuario} já está iniciando, aguardando...`);
+        return clientMap[usuario] || null;
+    }
+    qrStore[usuario + '_launching'] = true;
+
+    console.log(`[INSTÂNCIA] Criando nova instância para: ${usuario} (${totalAtivas + 1}/${MAX_INSTANCES})`);
 
     const sessionPath = path.join(__dirname, 'sessions', usuario);
-
-    // === CONTROLE DE TENTATIVAS POR USUÁRIO ===
     const qrAttempts = { count: 0, timeout: null };
-    const MAX_QR_ATTEMPTS = 4;        // Máximo 4 QRs (recomendado em produção)
-    const QR_EXPIRE_TIME = 60000;     // 60 segundos por QR
-    //===================INIT CLIENTE ====================================//
+    const MAX_QR_ATTEMPTS = 4;
+    const QR_EXPIRE_TIME = 60000;
+
     const client = new Client({
         authStrategy: new LocalAuth({ client: usuario, dataPath: sessionPath }),
         puppeteer: {
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote'],
             headless: true,
-            ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {})
+           ...(process.env.CHROME_PATH? { executablePath: process.env.CHROME_PATH } : {})
         },
         webVersionCache: {
             type: 'remote',
@@ -77,104 +84,89 @@ function criarInstancia(usuario) {
 
     client.on("qr", (qr) => {
         qrAttempts.count++;
-
         if (qrAttempts.count > MAX_QR_ATTEMPTS) {
-            console.log(`\n[LIMITE] ${usuario.toUpperCase()} atingiu ${MAX_QR_ATTEMPTS} tentativas. Parando.`);
+            console.log(`\n[LIMITE] ${usuario.toUpperCase()} atingiu ${MAX_QR_ATTEMPTS} tentativas.`);
             delete qrStore[usuario];
+            delete qrStore[usuario + '_launching'];
             client.destroy().catch(() => { });
             delete clientMap[usuario];
             return;
         }
-
         console.log(`QR CODE ${qrAttempts.count}/${MAX_QR_ATTEMPTS} → ${usuario.toUpperCase()}`);
-        // qrcodeterm.generate(qr, { small: true });
         qrStore[usuario] = qr;
-
-        // Limpa timeout antigo
         if (qrAttempts.timeout) clearTimeout(qrAttempts.timeout);
-
-        // Expira o QR em 60s e remove do qrStore (obrigatório!)
         qrAttempts.timeout = setTimeout(() => {
-            console.log(`[QR EXPIRADO] QR ${qrAttempts.count} de ${usuario} expirou → removido do qrStore`);
-            delete qrStore[usuario]; // ← ESSA LINHA SALVA VIDAS
+            delete qrStore[usuario];
         }, QR_EXPIRE_TIME);
     });
 
     client.on("authenticated", () => {
-        console.log(`[OK] Autenticado com sucesso: ${usuario}`);
+        console.log(`[OK] Autenticado: ${usuario}`);
         qrAttempts.count = 0;
         if (qrAttempts.timeout) clearTimeout(qrAttempts.timeout);
-        delete qrStore[usuario]; // Limpa QR da memória
+        delete qrStore[usuario];
+        delete qrStore[usuario + '_launching'];
     });
 
     client.on("ready", () => {
-        console.log(`[ONLINE] WhatsApp conectado → ${usuario}`);
-        console.warn(`Instância pronta: ${usuario} | Sessão salva em: ${sessionPath}\n`);
+        console.log(`[ONLINE] ${usuario} | Sessão: ${sessionPath}`);
+        delete qrStore[usuario + '_launching'];
     });
 
     client.on("auth_failure", (msg) => {
-        console.log(`[FALHA] Autenticação falhou → ${usuario}: ${msg}`);
+        console.log(`[FALHA] ${usuario}: ${msg}`);
+        delete qrStore[usuario + '_launching'];
     });
 
-    client.on("disconnected", (reason) => {
-        console.log(`[DESCONECTADO] ${usuario} | Motivo: ${reason}`);
+client.on("disconnected", (reason) => {
+    console.log(`[DESCONECTADO] ${usuario} | Motivo: ${reason}`);
+    delete qrStore[usuario];
+    delete qrStore[usuario + '_launching'];
+    try { client.destroy().catch(()=>{}); } catch(e) {}
+    delete clientMap[usuario];
+    launchesEmAndamento = Math.max(0, launchesEmAndamento - 1);
+    if (reason === "invalid_session" || reason === "logged_out") {
+        fs.rmSync(sessionPath, { recursive: true, force: true });
+    }
+});
 
-        // limpa QR sempre que desconecta
-        delete qrStore[usuario];
-
-        if (reason === "invalid_session" || reason === "logged_out") {
-            console.log(`[PARADO] Sessão inválida. Não será reconectado automaticamente.`);
-            delete clientMap[usuario];
-            fs.rmSync(sessionPath, { recursive: true, force: true });
-        } else if (["NAVIGATION", "TIMEOUT"].includes(reason)) {
-            console.log(`[RECONNECT] Desconexão temporária (${reason}). Limpando instância.`);
-            delete clientMap[usuario];
-            // mantém a pasta da sessão para tentar reconectar sem novo QR
-        }
-    });
-
-
-    // === LOGA QUEM TE MANDOU MENSAGEM ===
     client.on('message', async (msg) => {
         try {
             if (msg.fromMe) return;
-
             const isGrupo = msg.from.endsWith('@g.us');
-
             if (isGrupo) {
                 const chat = await msg.getChat();
                 const contato = await msg.getContact();
-                const nomeGrupo = chat.name || 'Grupo';
-                const nomePessoa = contato.pushname || contato.name || 'Desconhecido';
-                const numero = contato.id.user;
-
-                console.log('[MSG GRUPO] ' + usuario + ' ← ' + nomeGrupo + ' | ' + nomePessoa + ' (' + numero + '): ' + msg.body);
+                console.log('[MSG GRUPO] ' + usuario + ' ← ' + chat.name + ' | ' + contato.pushname + ': ' + msg.body);
             } else {
                 const contato = await msg.getContact();
-                const nome = contato.pushname || contato.name || 'Desconhecido';
-                const numero = contato.id.user || msg.from.split('@')[0]; // <-- AGORA IGUAL AO GRUPO
-
-                console.log('[MSG PV] ' + usuario + ' ← ' + nome + ' (' + numero + '): ' + msg.body);
+                console.log('[MSG PV] ' + usuario + ' ← ' + contato.pushname + ': ' + msg.body);
             }
         } catch (e) {
             console.log('[MSG RECEBIDA] ' + usuario + ' ← ' + msg.from + ': ' + msg.body);
         }
     });
 
+    try { fs.mkdirSync(sessionPath, { recursive: true }); } catch (e) {}
 
-    // Garante pasta da sessão
-    try {
-        fs.mkdirSync(sessionPath, { recursive: true });
-    } catch (e) {
-        console.error(`Erro criando pasta ${sessionPath}: ${e.message}`);
-    }
+    // Inicialização com controle de concorrência
+    launchesEmAndamento++;
+    client.initialize()
+       .catch(err => {
+            console.error(`[ERRO INIT] ${usuario}: ${err.message}`);
+            delete qrStore[usuario + '_launching'];
+            delete clientMap[usuario];
+        })
+       .finally(() => {
+            launchesEmAndamento--;
+        });
 
-    console.log(`[INIT] Inicializando cliente → ${usuario}`);
-    client.initialize();
     clientMap[usuario] = client;
-
     return client;
 }
+
+
+
 const ADMIN_USER = process.env.ADMIN_USER;
 const ADMIN_PASS = process.env.ADMIN_PASS;
 if (!ADMIN_USER || !ADMIN_PASS) {
@@ -188,11 +180,6 @@ if (!usuarios[ADMIN_USER]) {
 }
 console.log(`\n[ADMIN] Iniciando instância oficial: ${ADMIN_USER}`);
 const adminClient = criarInstancia(ADMIN_USER);
-
-let clientStatus = 'initializing';
-adminClient.on('ready', () => clientStatus = 'ready');
-adminClient.on('qr', () => clientStatus = 'qr');
-adminClient.on('disconnected', () => clientStatus = 'disconnected');
 
 function validarUsuarioSenha(user, pass) {
     const u = usuarios[user];
@@ -224,6 +211,7 @@ function requireAdmin(req, res, next) {
     }
     next();
 }
+
 app.post('/send-message', async (req, res) => {
     const { to, msg, login, pass } = req.body;
 
@@ -373,50 +361,47 @@ app.post('/send-document', async (req, res) => {
         }
 
         // === SALVA TEMP ===
+        const safeFilename = path.basename(filename) || 'boleto.pdf';
         tempFilePath = path.join(__dirname, `boleto_${Date.now()}_${numero.slice(-4)}.pdf`);
         fs.writeFileSync(tempFilePath, buffer);
+
         const media = MessageMedia.fromFilePath(tempFilePath);
+        media.filename = safeFilename; // <- CORREÇÃO: usa o nome que vem da API
+        media.mimetype = 'application/pdf';
 
         const chatId = `${numero}@s.whatsapp.net`;
 
-        // === ENVIA BOLETO ===
-        await instancia.sendMessage(chatId, media);
+        // === ENVIA BOLETO COM LEGENDA (se tiver) ===
+        const textoLimpo = caption.toString().replace(/<[^>]*>/g, '').trim();
+        if (textoLimpo) {
+            await instancia.sendMessage(chatId, media, { caption: textoLimpo });
+        } else {
+            await instancia.sendMessage(chatId, media);
+        }
 
-        // === ENVIA TEXTO DO BOLETO ===
-        //await new Promise(r => setTimeout(r, 2000));
-        //await instancia.sendMessage(chatId, `*Segue seu boleto em anexo!*`);
-
-        // === ENVIA VÍDEO TUTORIAL COMO DOCUMENTO (SOLUÇÃO PARA VPS) ===
+        // === ENVIA VÍDEO TUTORIAL COMO DOCUMENTO ===
         const videoPath = path.join(__dirname, 'videos', 'Video_Explicativo.mp4');
-        console.log(`[DOC] Caminho completo do vídeo: ${videoPath}`);
-        console.log(`[DOC] Vídeo existe no servidor? ${fs.existsSync(videoPath)}`);
-
         if (fs.existsSync(videoPath)) {
             try {
                 const stats = fs.statSync(videoPath);
-                console.log(`[DOC] Tamanho do vídeo: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+                console.log(`[DOC] Vídeo: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
-                await new Promise(r => setTimeout(r, 5000)); // delay maior pra garantir
+                await new Promise(r => setTimeout(r, 2000));
 
                 const videoMedia = MessageMedia.fromFilePath(videoPath);
                 videoMedia.mimetype = 'video/mp4';
-                videoMedia.filename = 'Video_Explicativo.mp4'; // nome bonito que aparece pro cliente
+                videoMedia.filename = 'Video_Explicativo.mp4';
 
                 await instancia.sendMessage(chatId, videoMedia, {
                     caption: '✅ Vídeo explicando como pagar pelo link Novo! 🎥',
-                    sendMediaAsDocument: true   // ← ESSA LINHA É A CORREÇÃO PRINCIPAL
+                    sendMediaAsDocument: true
                 });
 
-                console.info(`[DOC] ✅ Vídeo tutorial enviado como documento com sucesso para ${numero}`);
+                console.info(`[DOC] Vídeo enviado para ${numero}`);
             } catch (videoError) {
-                console.error(`[DOC] ❌ ERRO AO ENVIAR VÍDEO (como documento) para ${numero}:`, videoError.message);
-                console.error(`[DOC] Stack:`, videoError.stack);
-
-                // Fallback
+                console.error(`[DOC] Erro ao enviar vídeo para ${numero}:`, videoError.message);
                 await instancia.sendMessage(chatId, 'Desculpe, não consegui enviar o vídeo explicativo agora. 😔');
             }
-        } else {
-            console.warn(`[DOC] ⚠️ Vídeo não encontrado. Pulando envio.`);
         }
 
         // === LIMPA TEMP ===
@@ -425,7 +410,7 @@ app.post('/send-document', async (req, res) => {
         }
 
         // === SUCESSO ===
-        console.info(`[DOC] Boleto (+ vídeo como documento) enviado por ${login} → ${numero} (${(buffer.length / 1024).toFixed(1)} KB)`);
+        console.info(`[DOC] Boleto enviado por ${login} → ${numero} (${(buffer.length / 1024).toFixed(1)} KB)`);
         return res.json({
             success: true,
             message: "Boleto enviado com sucesso!",
@@ -438,8 +423,8 @@ app.post('/send-document', async (req, res) => {
             fs.unlinkSync(tempFilePath);
         }
 
-        const loginLog = req.body.login || 'desconhecido';
-        const toLog = req.body.to || 'desconhecido';
+        const loginLog = req.body?.login || 'desconhecido';
+        const toLog = req.body?.to || 'desconhecido';
 
         console.error(`[DOC] Erro grave (${loginLog} → ${toLog}): ${error.message}`);
 
@@ -616,6 +601,9 @@ app.get('/login', (req, res) => {
 </html>
     `);
 });
+
+
+
 app.post('/login-post', async (req, res) => {
     const { user, pass } = req.body;
     if (!user) return res.send("Envie o usuário.");
@@ -623,43 +611,56 @@ app.post('/login-post', async (req, res) => {
         console.log(`[LOGIN] Senha incorreta para: ${user}`);
         return res.send("Usuário não encontrado ou senha incorreta.");
     }
-    criarInstancia(user);
 
-    const timeout = 20000;
+    // 1 - SE JÁ TÁ ONLINE, RETORNA NA HORA (não espera 20s)
+    const existing = clientMap[user];
+    if (existing && existing.info) {
+        console.log(`[LOGIN] ${user} já está conectado`);
+        return res.send(`
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><title>Já Conectado</title>
+<style>body{font-family:Inter,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;display:flex;align-items:center;justify-content:center;color:#fff} .card{background:rgba(255,255,255,0.12);padding:40px;border-radius:20px;text-align:center}</style>
+</head><body><div class="card"><h2>✓ ${user.toUpperCase()} já está conectado!</h2><p>Sessão ativa, pode usar a API.</p><a href="/login" style="color:#fff">Voltar</a></div></body></html>`);
+    }
+
+   try {
+    criarInstancia(user);
+} catch (err) {
+    if (err.code === 'LIMITE_INSTANCIAS') {
+        return res.status(429).send(`
+        <h2>Servidor lotado</h2>
+        <p>Tem ${MAX_INSTANCES} instâncias ativas. Tente mais tarde ou fale com o admin para aumentar o limite.</p>
+        <a href="/login">Voltar</a>
+        `);
+    }
+    throw err;
+}
+
+    const timeout = 60000; // AGORA 60s - Chrome na VPS é lento
     const interval = 1000;
     const start = Date.now();
 
     (function waitForQR() {
+        // 2 - Se QR apareceu, mostra
         if (qrStore[user]) {
             return QRCode.toDataURL(qrStore[user], (err, url) => {
-                if (err) return res.send("Erro ao gerar imagem do QR.");
+                if (err) return res.send("Erro ao gerar imagem do QR. Tente novamente.");
                 return res.send(`
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WhatsApp Connect • ${user.toUpperCase()}</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:'Inter',-apple-system,system-ui,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;color:#fff;}
-        .card{background:rgba(255,255,255,0.1);backdrop-filter:blur(12px);border-radius:20px;border:1px solid rgba(255,255,255,0.2);padding:40px 30px;max-width:420px;width:100%;text-align:center;box-shadow:0 20px 40px rgba(0,0,0,0.3);}
-        h2{font-size:1.8rem;margin-bottom:8px;font-weight:700;}
-        .user{font-size:1.1rem;opacity:0.9;margin-bottom:30px;}
-        .qr-container{background:white;padding:20px;border-radius:16px;display:inline-block;margin:20px 0;box-shadow:0 10px 30px rgba(0,0,0,0.2);}
-        .qr-container img{width:260px;height:260px;border-radius:12px;}
-        .instructions{margin-top:30px;line-height:1.7;font-size:1rem;opacity:0.95;}
-        .steps{margin:20px 0;text-align:left;display:inline-block;background:rgba(255,255,255,0.15);padding:16px 20px;border-radius:12px;font-size:0.95rem;}
-        .steps li{margin:10px 0;}
-        .refresh{margin-top:25px;padding:12px 28px;background:rgba(255,255,255,0.25);border:none;border-radius:50px;color:white;font-weight:600;cursor:pointer;transition:all 0.3s;font-size:1rem;}
-        .refresh:hover{background:rgba(255,255,255,0.4);transform:translateY(-2px);}
-        .status{margin-top:20px;font-size:0.9rem;opacity:0.8;}
-        .whatsapp-icon{width:60px;height:60px;background:#25d366;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px;font-size:32px;box-shadow:0 8px 20px rgba(37,211,102,0.4);}
-        footer{margin-top:40px;font-size:0.85rem;opacity:0.7;}
+        body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;color:#fff;}
+        .card{background:rgba(255,255,255,0.1);backdrop-filter:blur(12px);border-radius:20px;padding:40px 30px;max-width:420px;width:100%;text-align:center}
+        .qr-container{background:white;padding:20px;border-radius:16px;display:inline-block;margin:20px 0}
+        .qr-container img{width:260px;height:260px}
     </style>
     <script>
-        setTimeout(() => location.reload(), 15000);
+        setTimeout(() => location.reload(), 45000);
         setInterval(() => {
             fetch('/check-qr?user=${user}').then(r => r.json()).then(data => {
                 if (!data.hasQR) window.location.href = '/login';
@@ -669,31 +670,11 @@ app.post('/login-post', async (req, res) => {
 </head>
 <body>
     <div class="card">
-        <div class="whatsapp-icon">SMS</div>
         <h2>Conectar WhatsApp</h2>
-        <div class="user">Usuário: <strong>${user.toUpperCase()}</strong></div>
-        <div class="qr-container">
-            <img src="${url}" alt="QR Code WhatsApp">
-        </div>
-        <div class="instructions">
-            <strong>Como conectar:</strong>
-            <div class="steps">
-                <ol>
-                    <li>Abra o WhatsApp no seu celular</li>
-                    <li>Vá em Configurações → Aparelhos conectados</li>
-                    <li>Toque em "Conectar um aparelho"</li>
-                    <li>Escaneie este QR Code</li>
-                </ol>
-            </div>
-            <p>Após escanear, aguarde aparecer no terminal:<br>
-            <strong>"WHATSAPP PRONTO E CONECTADO"</strong></p>
-        </div>
-        <button class="refresh" onclick="location.reload()">Atualizar QR</button>
-        <div class="status">
-            Página atualiza automaticamente a cada 15 segundos<br>
-            QR Code expira em alguns minutos
-        </div>
-        <footer>Multi-Instância WhatsApp • 2025</footer>
+        <p>Usuário: <strong>${user.toUpperCase()}</strong></p>
+        <div class="qr-container"><img src="${url}" alt="QR Code"></div>
+        <p>Escaneie no WhatsApp > Aparelhos conectados</p>
+        <button onclick="location.reload()" style="margin-top:15px;padding:10px 20px;border-radius:20px;border:none;cursor:pointer">Atualizar QR</button>
     </div>
 </body>
 </html>
@@ -701,62 +682,39 @@ app.post('/login-post', async (req, res) => {
             });
         }
 
-        // AQUI É A PARTE NOVA (timeout inteligente)
-        if (Date.now() - start >= timeout) {
-            console.log(`[LOGIN] Timeout 20s → verificando se ${user} já está conectado...`);
-
-            const client = clientMap[user];
-            if (client && client.info) {
-                // JÁ ESTÁ CONECTADO!
-                return res.send(`
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <title>Já Conectado • ${user.toUpperCase()}</title>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-        *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;color:#fff;}
-        .card{background:rgba(255,255,255,0.12);backdrop-filter:blur(14px);border-radius:24px;padding:50px 40px;max-width:420px;text-align:center;box-shadow:0 25px 50px rgba(0,0,0,0.35);}
-        .icon{width:90px;height:90px;background:#25D366;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 25px;font-size:48px;}
-        h2{font-size:2rem;margin-bottom:15px;}
-        p{line-height:1.7;margin:12px 0;}
-    </style>
-    <script>
-        let s = 20;
-        const t = setInterval(() => {
-            s--;
-            document.getElementById('c').innerText = s;
-            if(s <= 0) {
-                clearInterval(t);
-                window.location.href = '/login';
-            }
-        }, 1000);
-    </script>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">Check</div>
-        <h2>Você já está conectado!</h2>
-        <p><strong>${user.toUpperCase()}</strong></p>
-        <p>Sua sessão está ativa e pronta para uso.</p>
-        <p>Pode fechar esta aba ou usar a API.</p>
-        <p style="margin-top:30px;background:rgba(255,255,255,0.15);padding:12px;border-radius:12px;">
-            Redirecionando em <strong id="c">20</strong> segundos...
-        </p>
-    </div>
-</body>
-</html>
-                `);
-            } else {
-                return res.send("QR não foi gerado a tempo. Tente novamente ou verifique o terminal.");
-            }
+        // 3 - Se conectou enquanto esperava
+        const client = clientMap[user];
+        if (client && client.info) {
+            return res.send(`<h2>Conectado! ${user.toUpperCase()} online!</h2><script>setTimeout(()=>window.location='/login',2000)</script>`);
         }
 
-        setTimeout(waitForQR, interval);
+        // 4 - Ainda dentro do tempo? Continua esperando
+        if (Date.now() - start < timeout) {
+            return setTimeout(waitForQR, interval);
+        }
+
+        // 5 - Estourou os 60s - Chrome ainda iniciando
+        console.log(`[LOGIN] Timeout 60s sem QR para ${user} - Chrome pode estar lento`);
+        return res.send(`
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Carregando...</title>
+<style>body{font-family:sans-serif;background:#667eea;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center} .card{background:rgba(0,0,0,0.2);padding:30px;border-radius:15px}</style>
+<script>setTimeout(()=>location.reload(),8000);</script>
+</head><body>
+<div class="card">
+<h2>⏳ Iniciando navegador...</h2>
+<p>Primeira vez demora até 60s na VPS (Chrome pesado)</p>
+<p><strong>Não feche.</strong> Recarregando automaticamente em 8s...</p>
+<p style="margin-top:15px;opacity:0.8">Se ficar nisso, olhe o terminal: <code>pm2 logs</code></p>
+<button onclick="location.reload()" style="margin-top:20px;padding:10px 20px;border-radius:20px;border:none;cursor:pointer">Tentar agora</button>
+</div>
+</body></html>
+        `);
     })();
 });
+
+
+
 app.get('/check-qr', (req, res) => {
     res.json({ hasQR: !!qrStore[req.query.user] });
 });
@@ -876,13 +834,14 @@ app.get('/admin', requireAdmin, (req, res) => {
 </body>
 </html>`);
 });
-app.post('/admin-create', requireAdmin, (req, res) => {
+
+app.post('/admin-create', requireAdmin, async (req, res) => {
 
     const { user, pass } = req.body;
     if (!user || !pass) return res.send('Preencha usuário e senha');
     if (usuarios[user]) return res.send(`Usuário "${user}" já existe!`);
 
-    usuarios[user] = { senha: bcrypt.hashSync(pass, 10) };
+    usuarios[user] = { senha: await bcrypt.hash(pass, 10) };
     fs.writeFileSync(usersFilePath, JSON.stringify(usuarios, null, 2));
     console.log(`[ADMIN] Novo cliente criado: ${user}`);
 
@@ -960,6 +919,22 @@ app.use((err, req, res, next) => {
     console.error("[ERRO GLOBAL]", err);
     res.status(500).json({ success: false, error: "Erro interno do servidor" });
 });
+
+
+// limpa boleto que ficou pra trás e trava de launching
+setInterval(() => {
+    // limpa trava que ficou presa
+    for (const k of Object.keys(qrStore)) {
+        if (k.endsWith('_launching')) delete qrStore[k];
+    }
+    // limpa pdfs temporários de boleto
+    fs.readdirSync(__dirname).forEach(f => {
+        if (f.startsWith('boleto_') && f.endsWith('.pdf')) {
+            try { fs.unlinkSync(path.join(__dirname, f)); } catch{}
+        }
+    });
+}, 60 * 60 * 1000); // 1x por hora
+
 
 // ============================================= START DO SERVIDOR – SEMPRE POR ÚLTIMO!!! =============================================
 const PORT = process.env.PORT || 3000;
